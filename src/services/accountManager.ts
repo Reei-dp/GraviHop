@@ -50,20 +50,34 @@ export class AccountManager {
   }
 
   public async load(): Promise<AccountEntry[]> {
+    let pool: AccountEntry[] = [];
     try {
       const raw = await this.secretStorage.get(CONSTANTS.STORAGE_KEYS.ACCOUNTS_POOL);
       if (raw) {
-        this.accountsCache = JSON.parse(raw);
-      } else {
-        const fallbackRaw = this.globalState.get<string>(CONSTANTS.STORAGE_KEYS.ACCOUNTS_POOL);
-        this.accountsCache = fallbackRaw ? JSON.parse(fallbackRaw) : [];
+        pool = JSON.parse(raw);
       }
     } catch (e) {
       console.warn('[GraviHop] SecretStorage error, using fallback globalState:', e);
-      const fallbackRaw = this.globalState.get<string>(CONSTANTS.STORAGE_KEYS.ACCOUNTS_POOL);
-      this.accountsCache = fallbackRaw ? JSON.parse(fallbackRaw) : [];
     }
 
+    const fallbackRaw = this.globalState.get<string>(CONSTANTS.STORAGE_KEYS.ACCOUNTS_POOL);
+    if (fallbackRaw) {
+      try {
+        const fallbackList: AccountEntry[] = JSON.parse(fallbackRaw);
+        if (pool.length === 0) {
+          pool = fallbackList;
+        } else {
+          // Merge to ensure accounts are never dropped
+          for (const fb of fallbackList) {
+            if (!pool.some((a) => a.id === fb.id)) {
+              pool.push(fb);
+            }
+          }
+        }
+      } catch {}
+    }
+
+    this.accountsCache = pool;
     this.activeAccountId = this.globalState.get<string>(CONSTANTS.STORAGE_KEYS.ACTIVE_ACCOUNT_ID) || null;
 
     // Automatically capture active account if pool is empty
@@ -315,13 +329,14 @@ export class AccountManager {
           this._onDidChangeAccounts.fire(this.accountsCache);
 
           progress.report({ increment: 5, message: 'Switched successfully!' });
-          const choice = await vscode.window.showInformationMessage(
+          vscode.window.showInformationMessage(
             `GraviHop: Switched to ${target.email}!`,
             'Reload Window'
-          );
-          if (choice === 'Reload Window') {
-            await vscode.commands.executeCommand('workbench.action.reloadWindow');
-          }
+          ).then((choice) => {
+            if (choice === 'Reload Window') {
+              vscode.commands.executeCommand('workbench.action.reloadWindow');
+            }
+          });
           return true;
         } catch (err) {
           vscode.window.showErrorMessage(`Failed to switch account: ${err}`);
@@ -416,15 +431,18 @@ export class AccountManager {
 
               cleanup();
 
+              let newlyAdded: AccountEntry | null = null;
               await vscode.window.withProgress(
                 {
                   location: vscode.ProgressLocation.Notification,
                   title: 'GraviHop: Authorizing new account...',
                   cancellable: false,
                 },
-                async () => {
+                async (progress) => {
                   try {
+                    progress.report({ increment: 30, message: 'Exchanging authorization code...' });
                     const tokens = await GoogleAuthService.exchangeCodeForTokens(code, redirectUri);
+                    progress.report({ increment: 40, message: 'Fetching user profile...' });
                     const profile = await GoogleAuthService.fetchUserProfile(tokens.accessToken);
                     const email = profile?.email || 'unknown@gmail.com';
 
@@ -450,20 +468,24 @@ export class AccountManager {
 
                     await this.persistAccounts();
                     this._onDidChangeAccounts.fire(this.accountsCache);
-
-                    // Automatically activate and switch to the newly authorized account
-                    await this.switchToAccount(newEntry.id);
-
-                    vscode.window.showInformationMessage(
-                      `GraviHop: Account ${email} successfully added and activated!`
-                    );
-                    resolve(newEntry);
+                    newlyAdded = newEntry;
+                    progress.report({ increment: 30, message: 'Account saved!' });
                   } catch (e: any) {
                     vscode.window.showErrorMessage(`GraviHop OAuth failed: ${e.message}`);
-                    resolve(null);
                   }
                 }
               );
+
+              if (newlyAdded) {
+                vscode.window.showInformationMessage(
+                  `GraviHop: Account ${(newlyAdded as AccountEntry).email} successfully added!`
+                );
+                // Switch outside the authorizer progress dialog so notifications don't freeze
+                await this.switchToAccount((newlyAdded as AccountEntry).id);
+                resolve(newlyAdded);
+              } else {
+                resolve(null);
+              }
             }
           } catch (e) {
             cleanup();
@@ -482,9 +504,7 @@ export class AccountManager {
 
           const port = address.port;
           const redirectUri = `http://127.0.0.1:${port}/oauth-callback`;
-          const scopes = encodeURIComponent(
-            'https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/userinfo.profile'
-          );
+          const scopes = encodeURIComponent(CONSTANTS.GOOGLE_OAUTH.SCOPES.join(' '));
 
           const authUrl = `https://accounts.google.com/o/oauth2/v2/auth?client_id=${CONSTANTS.GOOGLE_OAUTH.CLIENT_ID}&redirect_uri=${encodeURIComponent(
             redirectUri

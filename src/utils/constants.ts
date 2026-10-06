@@ -23,6 +23,13 @@ export const CONSTANTS = {
     ),
     TOKEN_ENDPOINT: 'https://oauth2.googleapis.com/token',
     USERINFO_ENDPOINT: 'https://www.googleapis.com/oauth2/v2/userinfo',
+    SCOPES: [
+      'https://www.googleapis.com/auth/cloud-platform',
+      'https://www.googleapis.com/auth/userinfo.email',
+      'https://www.googleapis.com/auth/userinfo.profile',
+      'https://www.googleapis.com/auth/cclog',
+      'https://www.googleapis.com/auth/experimentsandconfigs',
+    ],
   },
 
   // Antigravity internal state database keys
