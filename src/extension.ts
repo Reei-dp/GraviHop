@@ -48,6 +48,61 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }),
     vscode.commands.registerCommand('gravihop.openDashboard', () => {
       HubPanel.show(context.extensionUri);
+    }),
+    vscode.commands.registerCommand('gravihop.healSession', async () => {
+      await accountManager.autoHealAuthState(true);
+      vscode.window.showInformationMessage('GraviHop: Active session healed and synced to Antigravity!');
+    }),
+    vscode.commands.registerCommand('gravihop.loginNative', async () => {
+      await vscode.window.withProgress(
+        {
+          location: vscode.ProgressLocation.Notification,
+          title: 'GraviHop: Antigravity Native Login',
+          cancellable: true,
+        },
+        async (progress, cancellationToken) => {
+          progress.report({ message: 'Opening Google authentication in browser...' });
+
+          const prevToken = await accountManager.getLiveAccessToken();
+
+          try {
+            await vscode.commands.executeCommand('workbench.action.loginWithRedirect');
+          } catch {
+            await vscode.commands.executeCommand('antigravity.login');
+          }
+
+          progress.report({ message: 'Waiting for sign-in in browser... (choose your account)' });
+
+          const startTime = Date.now();
+          const maxWaitMs = 120000; // 2 minutes
+
+          while (!cancellationToken.isCancellationRequested && Date.now() - startTime < maxWaitMs) {
+            await new Promise((r) => setTimeout(r, 1500));
+
+            const currentToken = await accountManager.getLiveAccessToken();
+            if (currentToken && currentToken !== prevToken) {
+              progress.report({ message: 'New session detected! Capturing account...' });
+              const captured = await accountManager.captureCurrentAccount(true);
+              if (captured) {
+                return;
+              }
+            }
+          }
+
+          if (!cancellationToken.isCancellationRequested) {
+            vscode.window
+              .showInformationMessage(
+                'GraviHop: Finished browser login? Click to capture new account.',
+                'Capture Session'
+              )
+              .then((choice) => {
+                if (choice === 'Capture Session') {
+                  accountManager.captureCurrentAccount(true);
+                }
+              });
+          }
+        }
+      );
     })
   );
 
@@ -67,15 +122,36 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   statusBar.update(initialActive, initialAccounts.length);
   await accountManager.autoHealAuthState();
 
-  // 6. Listen for IDE Auth session changes (auto-capture new logins)
+  // 6. Listen for Unified State Sync topic changes (auto-capture native logins & session updates)
+  const agySync = (vscode as any).antigravityUnifiedStateSync;
+  if (agySync && typeof agySync.subscribe === 'function') {
+    try {
+      const oauthSub = await agySync.subscribe('uss-oauth');
+      if (oauthSub && oauthSub.onDidChange) {
+        let topicTimer: NodeJS.Timeout | null = null;
+        context.subscriptions.push(
+          oauthSub.onDidChange(() => {
+            if (topicTimer) clearTimeout(topicTimer);
+            topicTimer = setTimeout(async () => {
+              await accountManager.onAgyAuthTopicChanged();
+            }, 1200);
+          })
+        );
+        console.log('[GraviHop] Subscribed to native uss-oauth topic changes.');
+      }
+    } catch (e) {
+      console.warn('[GraviHop] Failed to subscribe to uss-oauth:', e);
+    }
+  }
+
+  // Fallback: Listen for standard VS Code Auth session changes
   context.subscriptions.push(
     vscode.authentication.onDidChangeSessions(async () => {
       const config = vscode.workspace.getConfiguration('gravihop');
       if (config.get<boolean>('autoCaptureOnSessionChange', true)) {
-        // Wait slightly for state.vscdb to flush
         setTimeout(async () => {
-          await accountManager.captureCurrentAccount(true);
-        }, 1500);
+          await accountManager.onAgyAuthTopicChanged();
+        }, 1200);
       }
     })
   );

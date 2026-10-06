@@ -124,28 +124,103 @@ export class AccountManager {
     this._onDidChangeAccounts.fire(this.accountsCache);
   }
 
+  private isSwitchingOrLogging = false;
+
   /**
-   * Captures the account currently active in state.vscdb
+   * Reads OAuth token info directly from Antigravity Unified State Sync in-memory store
+   */
+  public async getInMemoryOAuthToken(): Promise<{
+    accessToken: string;
+    refreshToken: string;
+    expiryDateSeconds: number;
+    tokenType?: string;
+  } | null> {
+    try {
+      const agySync = (vscode as any).antigravityUnifiedStateSync;
+      if (agySync?.OAuthPreferences?.getOAuthTokenInfo) {
+        const tokenInfo = await agySync.OAuthPreferences.getOAuthTokenInfo();
+        if (tokenInfo && tokenInfo.accessToken) {
+          return {
+            accessToken: tokenInfo.accessToken,
+            refreshToken: tokenInfo.refreshToken || '',
+            expiryDateSeconds: tokenInfo.expiryDateSeconds || 0,
+            tokenType: tokenInfo.tokenType || 'Bearer',
+          };
+        }
+      }
+    } catch (e) {
+      console.warn('[GraviHop] getInMemoryOAuthToken error:', e);
+    }
+    return null;
+  }
+
+  /**
+   * Reads UserStatus protobuf directly from Antigravity Unified State Sync in-memory store
+   */
+  public async getInMemoryUserStatus(): Promise<string | null> {
+    try {
+      const agySync = (vscode as any).antigravityUnifiedStateSync;
+      if (agySync?.UserStatus?.getUserStatus) {
+        const status = await agySync.UserStatus.getUserStatus();
+        if (status && typeof status === 'string' && status.length > 0) {
+          return status;
+        }
+      }
+    } catch (e) {
+      console.warn('[GraviHop] getInMemoryUserStatus error:', e);
+    }
+    return null;
+  }
+
+  /**
+   * Returns current active accessToken (in-memory first, then SQLite disk)
+   */
+  public async getLiveAccessToken(): Promise<string | null> {
+    const inMem = await this.getInMemoryOAuthToken();
+    if (inMem?.accessToken) {
+      return inMem.accessToken;
+    }
+    const raw = await DbWatcher.getActiveOAuthTokenRaw();
+    if (raw) {
+      const decoded = ProtobufHelper.decodeOAuthToken(raw);
+      return decoded?.accessToken || null;
+    }
+    return null;
+  }
+
+  /**
+   * Captures the account currently active in Antigravity (memory first, then disk).
+   * Automatically adds as a new slot if it's a different Google account.
    */
   public async captureCurrentAccount(showNotification = true): Promise<AccountEntry | null> {
     try {
-      const oauthRaw = await DbWatcher.getActiveOAuthTokenRaw();
-      const userStatusRaw = await DbWatcher.getActiveUserStatusRaw();
+      // 1. Get tokens: in-memory first, fallback to SQLite disk
+      const inMemToken = await this.getInMemoryOAuthToken();
+      let accessToken = inMemToken?.accessToken || '';
+      let refreshToken = inMemToken?.refreshToken || '';
+      let expiryDateSeconds = inMemToken?.expiryDateSeconds || 0;
 
-      if (!oauthRaw) {
+      if (!accessToken || !refreshToken) {
+        const oauthRaw = await DbWatcher.getActiveOAuthTokenRaw();
+        if (oauthRaw) {
+          const decodedToken = ProtobufHelper.decodeOAuthToken(oauthRaw);
+          if (decodedToken) {
+            accessToken = decodedToken.accessToken || accessToken;
+            refreshToken = decodedToken.refreshToken || refreshToken;
+            expiryDateSeconds = decodedToken.expiryDateSeconds || expiryDateSeconds;
+          }
+        }
+      }
+
+      if (!accessToken && !refreshToken) {
         if (showNotification) {
           vscode.window.showWarningMessage('No active Google session found in Antigravity IDE.');
         }
         return null;
       }
 
-      const decodedToken = ProtobufHelper.decodeOAuthToken(oauthRaw);
-      if (!decodedToken || !decodedToken.refreshToken) {
-        if (showNotification) {
-          vscode.window.showErrorMessage('Could not extract refresh token from active session.');
-        }
-        return null;
-      }
+      // 2. Get user status: in-memory first, fallback to SQLite disk
+      let userStatusRaw = (await this.getInMemoryUserStatus()) || (await DbWatcher.getActiveUserStatusRaw()) || undefined;
 
       let email = '';
       let name = '';
@@ -153,20 +228,26 @@ export class AccountManager {
       let picture = '';
 
       if (userStatusRaw) {
-        const decodedStatus = ProtobufHelper.decodeUserStatus(userStatusRaw);
-        email = decodedStatus.email;
-        name = decodedStatus.name;
-        tier = decodedStatus.userTier || tier;
-        picture = decodedStatus.profilePictureUrl || '';
+        try {
+          const decodedStatus = ProtobufHelper.decodeUserStatus(userStatusRaw);
+          email = decodedStatus.email || '';
+          name = decodedStatus.name || '';
+          tier = decodedStatus.userTier || tier;
+          picture = decodedStatus.profilePictureUrl || '';
+        } catch {}
       }
 
-      // Try Google UserInfo API if details are missing
-      if (!email || !picture) {
-        const profile = await GoogleAuthService.fetchUserProfile(decodedToken.accessToken);
-        if (profile) {
-          email = email || profile.email;
-          name = name || profile.name;
-          picture = picture || profile.picture || '';
+      // 3. Always verify live Google profile directly from Google API using accessToken
+      if (accessToken) {
+        try {
+          const profile = await GoogleAuthService.fetchUserProfile(accessToken);
+          if (profile) {
+            email = profile.email || email;
+            name = profile.name || name;
+            picture = profile.picture || picture;
+          }
+        } catch (e) {
+          console.warn('[GraviHop] Google profile fetch failed during capture:', e);
         }
       }
 
@@ -181,38 +262,55 @@ export class AccountManager {
       // Fetch active quota
       const quota = await QuotaClient.fetchActiveQuota();
 
+      // Ensure models catalog is preserved
+      let finalUserStatusB64 = userStatusRaw;
+      const donor = this.accountsCache.find((a) => a.rawUserStatusB64 && a.rawUserStatusB64.length > 0)?.rawUserStatusB64;
+      if (!finalUserStatusB64 && donor) {
+        finalUserStatusB64 = donor;
+      }
+      if (finalUserStatusB64) {
+        const patched = ProtobufHelper.patchUserStatus(finalUserStatusB64, email, name, picture);
+        finalUserStatusB64 = patched.topicB64;
+      }
+
       const entry: AccountEntry = {
         id,
         email,
         name: name || email.split('@')[0],
         picture,
         tier,
-        refreshToken: decodedToken.refreshToken,
-        accessToken: decodedToken.accessToken,
-        expiryDateSeconds: decodedToken.expiryDateSeconds,
-        rawUserStatusB64: (userStatusRaw && userStatusRaw.length > 0)
-          ? userStatusRaw
-          : (existingIdx >= 0 ? this.accountsCache[existingIdx].rawUserStatusB64 : undefined),
+        refreshToken: refreshToken || (existingIdx >= 0 ? this.accountsCache[existingIdx].refreshToken : ''),
+        accessToken,
+        expiryDateSeconds,
+        rawUserStatusB64: finalUserStatusB64 || (existingIdx >= 0 ? this.accountsCache[existingIdx].rawUserStatusB64 : undefined),
         quota: quota || undefined,
         lastCapturedAt: Date.now(),
       };
 
-      if (existingIdx >= 0) {
+      const isNew = existingIdx < 0;
+      if (isNew) {
+        this.accountsCache.push(entry);
+      } else {
         this.accountsCache[existingIdx] = {
           ...this.accountsCache[existingIdx],
           ...entry,
         };
-      } else {
-        this.accountsCache.push(entry);
       }
 
       await this.setActiveAccountId(id);
       await this.persistAccounts();
+      this._onDidChangeAccounts.fire(this.accountsCache);
 
       if (showNotification) {
-        vscode.window.showInformationMessage(
-          `GraviHop: Saved account ${email} (Slot ${existingIdx >= 0 ? existingIdx + 1 : this.accountsCache.length}/${this.accountsCache.length})`
-        );
+        if (isNew) {
+          vscode.window.showInformationMessage(
+            `GraviHop: Captured new account ${email} (Slot ${this.accountsCache.length}/${this.accountsCache.length})! 🎉`
+          );
+        } else {
+          vscode.window.showInformationMessage(
+            `GraviHop: Saved account ${email} (Slot ${existingIdx + 1}/${this.accountsCache.length})`
+          );
+        }
       }
 
       return entry;
@@ -226,6 +324,37 @@ export class AccountManager {
   }
 
   /**
+   * Called when Antigravity's native uss-oauth topic changes in memory.
+   * Auto-detects if a different account signed in.
+   */
+  public async onAgyAuthTopicChanged(): Promise<void> {
+    if (this.isSwitchingOrLogging) {
+      return;
+    }
+
+    try {
+      const inMemToken = await this.getInMemoryOAuthToken();
+      if (!inMemToken?.accessToken) {
+        console.log('[GraviHop] USS reported empty/signedOut token. Respecting sign-out.');
+        return;
+      }
+
+      const profile = await GoogleAuthService.fetchUserProfile(inMemToken.accessToken);
+      if (!profile?.email) {
+        return;
+      }
+
+      const currentEmail = profile.email.toLowerCase();
+      if (currentEmail !== this.activeAccountId) {
+        console.log(`[GraviHop] Auto-detect: Antigravity session changed to ${currentEmail}! Auto-capturing...`);
+        await this.captureCurrentAccount(true);
+      }
+    } catch (e) {
+      console.warn('[GraviHop] onAgyAuthTopicChanged error:', e);
+    }
+  }
+
+  /**
    * Switches IDE to target account in 1-click
    */
   public async switchToAccount(id: string): Promise<boolean> {
@@ -235,7 +364,9 @@ export class AccountManager {
       return false;
     }
 
-    return vscode.window.withProgress(
+    this.isSwitchingOrLogging = true;
+    try {
+      return await vscode.window.withProgress(
       {
         location: vscode.ProgressLocation.Notification,
         title: `GraviHop: Switching to ${target.email}...`,
@@ -257,17 +388,19 @@ export class AccountManager {
 
           progress.report({ increment: 20, message: 'Updating session credentials...' });
 
-          // Ensure valid userStatus (never wipe IDE model catalog and tiers)
-          if (!target.rawUserStatusB64 || target.rawUserStatusB64.length === 0) {
-            const donor = this.accountsCache.find((a) => a.rawUserStatusB64 && a.rawUserStatusB64.length > 0);
-            if (donor) {
-              target.rawUserStatusB64 = donor.rawUserStatusB64;
-            } else {
-              const currentInDb = await DbWatcher.getActiveUserStatusRaw();
-              if (currentInDb && currentInDb.length > 0) {
-                target.rawUserStatusB64 = currentInDb;
-              }
-            }
+          // Ensure valid userStatus with target email & name (never wipe IDE model catalog and tiers)
+          const donor =
+            target.rawUserStatusB64 ||
+            this.accountsCache.find((a) => a.rawUserStatusB64 && a.rawUserStatusB64.length > 0)?.rawUserStatusB64 ||
+            (await DbWatcher.getActiveUserStatusRaw());
+          if (donor) {
+            const patched = ProtobufHelper.patchUserStatus(
+              donor,
+              target.email,
+              target.name,
+              target.picture
+            );
+            target.rawUserStatusB64 = patched.topicB64;
           }
 
           // 2. NATIVE UNIFIED STATE SYNC: Update in-memory state in Antigravity IDE
@@ -317,6 +450,9 @@ export class AccountManager {
         }
       }
     );
+    } finally {
+      this.isSwitchingOrLogging = false;
+    }
   }
 
   public async removeAccount(id: string): Promise<void> {
@@ -338,6 +474,10 @@ export class AccountManager {
     vscode.window.showInformationMessage(`GraviHop: Removed ${account.email}`);
   }
 
+  /**
+   * Pushes in-memory auth state and tokens directly into Antigravity Unified State Sync (USS)
+   * This immediately transitions the IDE Chat and agents to signedIn without reload.
+   */
   /**
    * Pushes in-memory auth state and tokens directly into Antigravity Unified State Sync (USS)
    * This immediately transitions the IDE Chat and agents to signedIn without reload.
@@ -393,7 +533,38 @@ export class AccountManager {
         console.log(`[GraviHop] Native USS authState pushed: ${state}`);
       }
 
-      // 3. Trigger native IDE auth refresh event
+      // 3. In-memory userStatusSentinelKey in uss-userStatus topic (crucial for models & session detection)
+      if (account && agySync.pushUpdate) {
+        let innerStatus = ProtobufHelper.extractInnerUserStatus(account.rawUserStatusB64);
+        if (!innerStatus) {
+          const donor = this.accountsCache.find((a) => a.rawUserStatusB64 && a.rawUserStatusB64.length > 0);
+          if (donor?.rawUserStatusB64) {
+            const patched = ProtobufHelper.patchUserStatus(
+              donor.rawUserStatusB64,
+              account.email,
+              account.name,
+              account.picture
+            );
+            innerStatus = patched.innerB64;
+            account.rawUserStatusB64 = patched.topicB64;
+          }
+        }
+        if (innerStatus) {
+          await agySync.pushUpdate({
+            topicName: 'uss-userStatus',
+            appliedUpdate: {
+              key: 'userStatusSentinelKey',
+              newRow: {
+                value: innerStatus,
+                eTag: 0,
+              },
+            },
+          });
+          console.log('[GraviHop] Native USS userStatus pushed successfully.');
+        }
+      }
+
+      // 4. Trigger native IDE auth refresh event
       try {
         await vscode.commands.executeCommand('antigravity.handleAuthRefresh');
         console.log('[GraviHop] Executed antigravity.handleAuthRefresh');
@@ -406,28 +577,32 @@ export class AccountManager {
   }
 
   /**
-   * Checks current IDE auth state. If it is in 'loginError' or broken,
+   * Checks current IDE auth state. If it is in 'loginError' (IDE crash/desync),
    * automatically heals it by syncing the active account credentials.
+   * NOTE: Never auto-heals when deliberately signed out.
    */
-  public async autoHealAuthState(): Promise<void> {
+  public async autoHealAuthState(force = false): Promise<void> {
     try {
       const agySync = (vscode as any).antigravityUnifiedStateSync;
-      if (!agySync) return;
-
-      const currentAuthState = agySync.OAuthPreferences?.getAuthState
-        ? await agySync.OAuthPreferences.getAuthState()
-        : null;
-
-      console.log('[GraviHop] Current Antigravity auth state:', currentAuthState);
-
       const active = this.getActiveAccount();
-      if (
-        active &&
-        (currentAuthState === 'loginError' ||
-          currentAuthState === 'uninitialized' ||
-          currentAuthState === 'signedOut')
-      ) {
-        console.log(`[GraviHop] Detected auth state '${currentAuthState}'. Auto-healing with active account ${active.email}...`);
+      if (!active) return;
+
+      let needsHeal = force;
+      if (!needsHeal && agySync) {
+        const currentAuthState = agySync.OAuthPreferences?.getAuthState
+          ? await agySync.OAuthPreferences.getAuthState()
+          : null;
+
+        // ONLY auto-heal if Antigravity is in an explicit error state, NOT on user logout or normal transition!
+        if (currentAuthState === 'loginError') {
+          needsHeal = true;
+          console.log(
+            `[GraviHop] Detected loginError state in Antigravity. Healing with active account ${active.email}...`
+          );
+        }
+      }
+
+      if (needsHeal) {
         await this.pushNativeAuthState('signedIn', active);
         try {
           await vscode.commands.executeCommand(CONSTANTS.COMMANDS.RESTART_LS);
@@ -505,53 +680,71 @@ export class AccountManager {
               cleanup();
 
               let newlyAdded: AccountEntry | null = null;
-              await vscode.window.withProgress(
-                {
-                  location: vscode.ProgressLocation.Notification,
-                  title: 'GraviHop: Authorizing new account...',
-                  cancellable: false,
-                },
-                async (progress) => {
-                  try {
-                    progress.report({ increment: 30, message: 'Exchanging authorization code...' });
-                    const tokens = await GoogleAuthService.exchangeCodeForTokens(code, redirectUri);
-                    progress.report({ increment: 40, message: 'Fetching user profile...' });
-                    const profile = await GoogleAuthService.fetchUserProfile(tokens.accessToken);
-                    const email = profile?.email || 'unknown@gmail.com';
+              this.isSwitchingOrLogging = true;
+              try {
+                await vscode.window.withProgress(
+                  {
+                    location: vscode.ProgressLocation.Notification,
+                    title: 'GraviHop: Authorizing new account...',
+                    cancellable: false,
+                  },
+                  async (progress) => {
+                    try {
+                      progress.report({ increment: 30, message: 'Exchanging authorization code...' });
+                      const tokens = await GoogleAuthService.exchangeCodeForTokens(code, redirectUri);
+                      progress.report({ increment: 40, message: 'Fetching user profile...' });
+                      const profile = await GoogleAuthService.fetchUserProfile(tokens.accessToken);
+                      const email = profile?.email || 'unknown@gmail.com';
 
-                    const donor = this.accountsCache.find((a) => a.rawUserStatusB64 && a.rawUserStatusB64.length > 0);
-                    const newEntry: AccountEntry = {
-                      id: email,
-                      email: email,
-                      name: profile?.name || email.split('@')[0],
-                      picture: profile?.picture,
-                      refreshToken: tokens.refreshToken,
-                      accessToken: tokens.accessToken,
-                      expiryDateSeconds: tokens.expiryDateSeconds,
-                      rawUserStatusB64: donor?.rawUserStatusB64,
-                      lastCapturedAt: Date.now(),
-                    };
+                      const donor =
+                        this.accountsCache.find((a) => a.rawUserStatusB64 && a.rawUserStatusB64.length > 0)?.rawUserStatusB64 ||
+                        (await DbWatcher.getActiveUserStatusRaw());
+                      let userStatusTopic = donor;
+                      if (donor) {
+                        const patched = ProtobufHelper.patchUserStatus(
+                          donor,
+                          email,
+                          profile?.name,
+                          profile?.picture
+                        );
+                        userStatusTopic = patched.topicB64;
+                      }
 
-                    const existingIdx = this.accountsCache.findIndex((a) => a.id === newEntry.id);
-                    if (existingIdx >= 0) {
-                      this.accountsCache[existingIdx] = newEntry;
-                    } else {
-                      this.accountsCache.push(newEntry);
+                      const newEntry: AccountEntry = {
+                        id: email,
+                        email: email,
+                        name: profile?.name || email.split('@')[0],
+                        picture: profile?.picture,
+                        refreshToken: tokens.refreshToken,
+                        accessToken: tokens.accessToken,
+                        expiryDateSeconds: tokens.expiryDateSeconds,
+                        rawUserStatusB64: userStatusTopic || undefined,
+                        lastCapturedAt: Date.now(),
+                      };
+
+                      const existingIdx = this.accountsCache.findIndex((a) => a.id === newEntry.id);
+                      if (existingIdx >= 0) {
+                        this.accountsCache[existingIdx] = newEntry;
+                      } else {
+                        this.accountsCache.push(newEntry);
+                      }
+
+                      await this.persistAccounts();
+                      this._onDidChangeAccounts.fire(this.accountsCache);
+                      newlyAdded = newEntry;
+                      progress.report({ increment: 30, message: 'Account saved!' });
+                    } catch (e: any) {
+                      vscode.window.showErrorMessage(`GraviHop OAuth failed: ${e.message}`);
                     }
-
-                    await this.persistAccounts();
-                    this._onDidChangeAccounts.fire(this.accountsCache);
-                    newlyAdded = newEntry;
-                    progress.report({ increment: 30, message: 'Account saved!' });
-                  } catch (e: any) {
-                    vscode.window.showErrorMessage(`GraviHop OAuth failed: ${e.message}`);
                   }
-                }
-              );
+                );
+              } finally {
+                this.isSwitchingOrLogging = false;
+              }
 
               if (newlyAdded) {
                 vscode.window.showInformationMessage(
-                  `GraviHop: Account ${(newlyAdded as AccountEntry).email} successfully added!`
+                  `GraviHop: Account ${(newlyAdded as AccountEntry).email} successfully added (Slot ${this.accountsCache.length}/${this.accountsCache.length})!`
                 );
                 // Switch outside the authorizer progress dialog so notifications don't freeze
                 await this.switchToAccount((newlyAdded as AccountEntry).id);

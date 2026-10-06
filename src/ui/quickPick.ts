@@ -4,7 +4,7 @@ import { CONSTANTS } from '../utils/constants';
 
 interface AccountQuickPickItem extends vscode.QuickPickItem {
   accountId?: string;
-  action?: 'capture' | 'login' | 'refresh' | 'dashboard';
+  action?: 'capture' | 'login' | 'nativeLogin' | 'refresh' | 'dashboard';
 }
 
 export class QuickPickManager {
@@ -83,9 +83,15 @@ export class QuickPickManager {
     });
 
     items.push({
-      label: '$(browser) Log In with New Account...',
-      description: 'Open browser to authenticate another Google account',
+      label: '$(browser) Log In with New Account (GraviHop Browser)...',
+      description: 'Direct browser OAuth with account selector screen',
       action: 'login',
+    });
+
+    items.push({
+      label: '$(shield) Antigravity Native Login Flow...',
+      description: 'Native IDE login with automatic new account capture',
+      action: 'nativeLogin',
     });
 
     items.push({
@@ -123,6 +129,9 @@ export class QuickPickManager {
           break;
         case 'login':
           await manager.loginWithGoogleBrowser();
+          break;
+        case 'nativeLogin':
+          await vscode.commands.executeCommand('gravihop.loginNative');
           break;
         case 'refresh':
           await manager.refreshActiveQuota();

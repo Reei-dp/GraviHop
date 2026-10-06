@@ -2,7 +2,7 @@
   "name": "gravihop",
   "displayName": "GraviHop — Antigravity Account Switcher",
   "description": "Multi-account pool manager, real-time quota monitor and 1-click seamless account switcher for Antigravity IDE",
-  "version": "0.1.8",
+  "version": "0.1.9",
   "publisher": "reei",
   "license": "MIT",
   "repository": {
@@ -63,6 +63,16 @@
         "command": "gravihop.openDashboard",
         "title": "GraviHop: Open Accounts Dashboard",
         "icon": "$(organization)"
+      },
+      {
+        "command": "gravihop.healSession",
+        "title": "GraviHop: Heal & Restore Active Session",
+        "icon": "$(pulse)"
+      },
+      {
+        "command": "gravihop.loginNative",
+        "title": "GraviHop: Antigravity Native Login Flow",
+        "icon": "$(sign-in)"
       }
     ],
     "keybindings": [

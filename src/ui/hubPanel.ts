@@ -76,6 +76,10 @@ export class HubPanel {
             await manager.loginWithGoogleBrowser();
             this.updateContent();
             break;
+          case 'nativeLogin':
+            await vscode.commands.executeCommand('gravihop.loginNative');
+            this.updateContent();
+            break;
           case 'refresh':
             await manager.refreshActiveQuota();
             this.updateContent();
@@ -503,10 +507,13 @@ export class HubPanel {
       </div>
 
       <div class="header-actions">
-        <button class="btn-secondary" id="btnCapture" title="Save current account in IDE">
-          Capture Current
+        <button class="btn-secondary" id="btnCapture" title="Capture active session in IDE">
+          Capture Active
         </button>
-        <button class="btn-primary" id="btnLogin" title="Authorize via browser">
+        <button class="btn-secondary" id="btnNativeLogin" title="Sign in via IDE native redirect (auto-detected)">
+          ⚡ Native Login
+        </button>
+        <button class="btn-primary" id="btnLogin" title="Authorize via browser with Google account chooser">
           + Add Account
         </button>
         <button class="btn-icon" id="btnRefresh" title="Refresh quotas (R)">
@@ -714,6 +721,10 @@ export class HubPanel {
 
     document.getElementById('btnCapture').addEventListener('click', () => {
       vscode.postMessage({ command: 'capture' });
+    });
+
+    document.getElementById('btnNativeLogin').addEventListener('click', () => {
+      vscode.postMessage({ command: 'nativeLogin' });
     });
 
     document.getElementById('btnLogin').addEventListener('click', () => {

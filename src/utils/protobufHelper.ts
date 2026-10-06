@@ -251,4 +251,105 @@ export class ProtobufHelper {
       profilePictureUrl,
     };
   }
+
+  /**
+   * Extracts inner Base64 string for userStatusSentinelKey from raw topic Base64 (from state.vscdb)
+   * or ensures the provided string is valid inner userStatus.
+   */
+  public static extractInnerUserStatus(rawB64?: string): string | null {
+    if (!rawB64 || rawB64.trim().length === 0) {
+      return null;
+    }
+    try {
+      const rawBytes = Buffer.from(rawB64, 'base64');
+      const sentinel = Buffer.from('userStatusSentinelKey', 'utf-8');
+      const idx = rawBytes.indexOf(sentinel);
+      if (idx !== -1) {
+        const tail = rawBytes.subarray(idx + sentinel.length);
+        const text = tail.toString('latin1');
+        const match = text.match(/([A-Za-z0-9+/=]{100,})/);
+        if (match) {
+          return match[1];
+        }
+      }
+      return rawB64;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Encodes inner UserStatus Base64 into outer Topic Base64 suitable for state.vscdb
+   */
+  public static encodeUserStatusTopic(innerB64: string): string {
+    const rowSub = this.encodeField(1, 2, Buffer.from(innerB64, 'utf-8'));
+    const entrySub = Buffer.concat([
+      this.encodeField(1, 2, Buffer.from('userStatusSentinelKey', 'utf-8')),
+      this.encodeField(2, 2, rowSub),
+    ]);
+    const topicBytes = this.encodeField(1, 2, entrySub);
+    return topicBytes.toString('base64');
+  }
+
+  /**
+   * Takes a donor raw user status (with model catalog preserved) and patches email, name, picture.
+   */
+  public static patchUserStatus(
+    donorRawB64: string,
+    email: string,
+    name?: string,
+    pictureUrl?: string
+  ): { innerB64: string; topicB64: string } {
+    const donorInnerB64 = this.extractInnerUserStatus(donorRawB64) || donorRawB64;
+    const innerBytes = Buffer.from(donorInnerB64, 'base64');
+
+    // Parse fields from inner UserStatus message
+    let pos = 0;
+    const fields: Array<{ fn: number; wt: number; val: Buffer | number }> = [];
+
+    while (pos < innerBytes.length) {
+      const { value: tag, newOffset: nextOffset } = this.decodeVarint(innerBytes, pos);
+      pos = nextOffset;
+      const fn = tag >> 3;
+      const wt = tag & 7;
+
+      if (wt === 0) {
+        const { value: val, newOffset } = this.decodeVarint(innerBytes, pos);
+        pos = newOffset;
+        fields.push({ fn, wt, val });
+      } else if (wt === 2) {
+        const { value: length, newOffset } = this.decodeVarint(innerBytes, pos);
+        pos = newOffset;
+        const val = innerBytes.subarray(pos, pos + length);
+        pos += length;
+        fields.push({ fn, wt, val });
+      } else {
+        break;
+      }
+    }
+
+    const userName = name || email.split('@')[0];
+    const newFields: Buffer[] = [];
+
+    for (const f of fields) {
+      if (f.fn === 3) {
+        // Name
+        newFields.push(this.encodeField(3, 2, Buffer.from(userName, 'utf-8')));
+      } else if (f.fn === 7) {
+        // Email
+        newFields.push(this.encodeField(7, 2, Buffer.from(email, 'utf-8')));
+      } else if (f.fn === 38 && pictureUrl) {
+        // Profile picture
+        newFields.push(this.encodeField(38, 2, Buffer.from(pictureUrl, 'utf-8')));
+      } else {
+        newFields.push(this.encodeField(f.fn, f.wt, f.val));
+      }
+    }
+
+    const newInner = Buffer.concat(newFields);
+    const innerB64 = newInner.toString('base64');
+    const topicB64 = this.encodeUserStatusTopic(innerB64);
+
+    return { innerB64, topicB64 };
+  }
 }

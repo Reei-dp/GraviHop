@@ -22,6 +22,10 @@ export class AccountsWebviewProvider implements vscode.WebviewViewProvider {
 
     webviewView.webview.html = this.getHtmlContent();
 
+    webviewView.onDidDispose(() => {
+      this.view = undefined;
+    });
+
     // Handle messages from the webview
     webviewView.webview.onDidReceiveMessage(async (message) => {
       const manager = AccountManager.getInstance();
@@ -42,8 +46,15 @@ export class AccountsWebviewProvider implements vscode.WebviewViewProvider {
         case 'login':
           await manager.loginWithGoogleBrowser();
           break;
+        case 'nativeLogin':
+          await vscode.commands.executeCommand('gravihop.loginNative');
+          break;
         case 'refresh':
           await manager.refreshActiveQuota();
+          break;
+        case 'heal':
+          await manager.autoHealAuthState(true);
+          vscode.window.showInformationMessage('GraviHop: Session healed and synchronized!');
           break;
       }
     });
@@ -60,15 +71,19 @@ export class AccountsWebviewProvider implements vscode.WebviewViewProvider {
     if (!this.view) {
       return;
     }
-    const manager = AccountManager.getInstance();
-    const accounts = manager.getAccounts();
-    const activeAccount = manager.getActiveAccount();
+    try {
+      const manager = AccountManager.getInstance();
+      const accounts = manager.getAccounts();
+      const activeAccount = manager.getActiveAccount();
 
-    this.view.webview.postMessage({
-      type: 'state',
-      accounts,
-      activeId: activeAccount?.id || null,
-    });
+      this.view.webview.postMessage({
+        type: 'state',
+        accounts,
+        activeId: activeAccount?.id || null,
+      });
+    } catch {
+      this.view = undefined;
+    }
   }
 
   private getHtmlContent(): string {
@@ -363,9 +378,10 @@ export class AccountsWebviewProvider implements vscode.WebviewViewProvider {
   <div class="header-panel">
     <span class="pool-badge" id="poolCount">0 Accounts</span>
     <div class="header-actions">
-      <button class="icon-btn" onclick="captureAccount()">+ Save Active</button>
-      <button class="icon-btn" onclick="loginAccount()">🌐 Login New</button>
-      <button class="icon-btn" onclick="refreshQuotas()">↻</button>
+      <button class="icon-btn" onclick="captureAccount()" title="Capture current IDE session">+ Capture</button>
+      <button class="icon-btn" onclick="nativeLogin()" title="Antigravity Native Browser Login">⚡ Native</button>
+      <button class="icon-btn" onclick="loginAccount()" title="Direct Browser Login (with Account Selector)">🌐 Browser</button>
+      <button class="icon-btn" onclick="refreshQuotas()" title="Refresh Quotas">↻</button>
     </div>
   </div>
 
@@ -376,6 +392,10 @@ export class AccountsWebviewProvider implements vscode.WebviewViewProvider {
 
     function captureAccount() {
       vscode.postMessage({ command: 'capture' });
+    }
+
+    function nativeLogin() {
+      vscode.postMessage({ command: 'nativeLogin' });
     }
 
     function loginAccount() {
