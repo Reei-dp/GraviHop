@@ -1,0 +1,137 @@
+{
+  "name": "gravihop",
+  "displayName": "GraviHop — Antigravity Account Switcher",
+  "description": "Multi-account pool manager, real-time quota monitor and 1-click seamless account switcher for Antigravity IDE",
+  "version": "0.1.0",
+  "publisher": "reei",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Reei-dp/GraviHop"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other",
+    "Productivity"
+  ],
+  "keywords": [
+    "antigravity",
+    "account-switcher",
+    "gemini",
+    "quota",
+    "limits"
+  ],
+  "main": "./dist/extension.js",
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "gravihop.selectAccount",
+        "title": "GraviHop: Open Hub Control Center",
+        "icon": "$(dashboard)"
+      },
+      {
+        "command": "gravihop.openHub",
+        "title": "GraviHop: Open Hub Control Center",
+        "icon": "$(dashboard)"
+      },
+      {
+        "command": "gravihop.selectAccountQuickPick",
+        "title": "GraviHop: Switch Account (QuickPick Menu)",
+        "icon": "$(arrow-swap)"
+      },
+      {
+        "command": "gravihop.refreshQuotas",
+        "title": "GraviHop: Refresh Quotas",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "gravihop.captureCurrentAccount",
+        "title": "GraviHop: Capture / Save Active Account",
+        "icon": "$(add)"
+      },
+      {
+        "command": "gravihop.openDashboard",
+        "title": "GraviHop: Open Accounts Dashboard",
+        "icon": "$(organization)"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "gravihop.selectAccount",
+        "key": "ctrl+shift+c",
+        "mac": "cmd+shift+c"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "gravihop-sidebar",
+          "title": "GraviHop",
+          "icon": "$(organization)"
+        }
+      ]
+    },
+    "views": {
+      "gravihop-sidebar": [
+        {
+          "type": "webview",
+          "id": "gravihop.accountsView",
+          "name": "Accounts & Quotas"
+        }
+      ]
+    },
+    "menus": {
+      "view/title": [
+        {
+          "command": "gravihop.refreshQuotas",
+          "when": "view == gravihop.accountsView",
+          "group": "navigation@1"
+        },
+        {
+          "command": "gravihop.captureCurrentAccount",
+          "when": "view == gravihop.accountsView",
+          "group": "navigation@2"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "GraviHop",
+      "properties": {
+        "gravihop.autoRefreshIntervalMinutes": {
+          "type": "number",
+          "default": 10,
+          "description": "Interval in minutes for automatic background quota refresh (0 to disable)"
+        },
+        "gravihop.lowQuotaWarningThreshold": {
+          "type": "number",
+          "default": 10,
+          "description": "Show a switch warning when quota drops below this percentage (e.g. 10%)"
+        },
+        "gravihop.autoCaptureOnSessionChange": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically detect and save accounts when logging in via browser"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run build",
+    "compile": "tsc -noEmit",
+    "build": "esbuild src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node --target=node20 --minify",
+    "watch": "esbuild src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node --target=node20 --watch",
+    "package": "vsce package --no-dependencies"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "^2.24.0",
+    "esbuild": "^0.21.0",
+    "typescript": "^5.4.0"
+  }
+}

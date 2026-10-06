@@ -1,0 +1,9 @@
+.vscode/**
+.vscode-test/**
+src/**
+tsconfig.json
+.gitignore
+.git/**
+.github/**
+vsc-extension-quickstart.md
+*.vsix
