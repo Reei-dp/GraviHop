@@ -339,6 +339,15 @@ export class AccountsWebviewProvider implements vscode.WebviewViewProvider {
       background: rgba(239, 68, 68, 0.1);
     }
 
+    .del-btn.confirm-del {
+      color: #ffffff !important;
+      background: var(--danger) !important;
+      border-color: var(--danger) !important;
+      font-size: 11px;
+      font-weight: 600;
+      padding: 4px 6px;
+    }
+
     .empty-state {
       text-align: center;
       padding: 30px 10px;
@@ -381,8 +390,41 @@ export class AccountsWebviewProvider implements vscode.WebviewViewProvider {
       vscode.postMessage({ command: 'switch', accountId: id });
     }
 
-    function deleteAccount(id) {
-      vscode.postMessage({ command: 'delete', accountId: id });
+    let pendingDeleteId = null;
+    let deleteTimeout = null;
+
+    function handleDelete(id, btn) {
+      if (pendingDeleteId === id) {
+        clearTimeout(deleteTimeout);
+        pendingDeleteId = null;
+        if (btn) {
+          btn.disabled = true;
+          btn.textContent = '...';
+        }
+        vscode.postMessage({ command: 'delete', accountId: id });
+      } else {
+        if (deleteTimeout) clearTimeout(deleteTimeout);
+        document.querySelectorAll('.del-btn').forEach(b => {
+          b.textContent = '✕';
+          b.classList.remove('confirm-del');
+        });
+
+        pendingDeleteId = id;
+        if (btn) {
+          btn.textContent = 'Remove?';
+          btn.classList.add('confirm-del');
+        }
+
+        deleteTimeout = setTimeout(() => {
+          if (pendingDeleteId === id) {
+            pendingDeleteId = null;
+            if (btn) {
+              btn.textContent = '✕';
+              btn.classList.remove('confirm-del');
+            }
+          }
+        }, 3500);
+      }
     }
 
     function getBarColor(pct) {
@@ -479,7 +521,7 @@ export class AccountsWebviewProvider implements vscode.WebviewViewProvider {
               <button class="switch-btn" \${isActive ? 'disabled' : ''} onclick="switchAccount('\${acc.id}')">
                 \${isActive ? 'Active Now' : 'Switch to Account'}
               </button>
-              <button class="del-btn" title="Remove from pool" onclick="deleteAccount('\${acc.id}')">✕</button>
+              <button class="del-btn" id="del-btn-\${acc.id}" title="Remove from pool" onclick="handleDelete('\${acc.id}', this)">✕</button>
             </div>
           </div>
         \`;

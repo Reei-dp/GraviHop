@@ -438,6 +438,20 @@ export class HubPanel {
       background: rgba(239, 68, 68, 0.1);
     }
 
+    .btn-delete.confirm-delete {
+      color: #ffffff !important;
+      background: #dc2626 !important;
+      border: 1px solid #ef4444 !important;
+      font-size: 11px;
+      font-weight: 600;
+      padding: 3px 8px;
+      border-radius: 4px;
+    }
+
+    .btn-delete.confirm-delete:hover {
+      background: #b91c1c !important;
+    }
+
     /* Footer */
     .footer {
       display: flex;
@@ -619,7 +633,7 @@ export class HubPanel {
                   Switch
                 </button>
               \` : ''}
-              <button class="btn-icon btn-delete" title="Remove account" onclick="deleteAcc('\${acc.id}', '\${acc.email}')">
+              <button class="btn-icon btn-delete" id="btn-del-\${acc.id}" title="Remove account" onclick="handleDelete('\${acc.id}', this)">
                 ✕
               </button>
             </div>
@@ -637,9 +651,40 @@ export class HubPanel {
       vscode.postMessage({ command: 'switch', accountId: id });
     }
 
-    function deleteAcc(id, email) {
-      if (confirm('Remove ' + email + ' from GraviHop?')) {
+    let pendingDeleteId = null;
+    let deleteTimeout = null;
+
+    function handleDelete(id, btn) {
+      if (pendingDeleteId === id) {
+        clearTimeout(deleteTimeout);
+        pendingDeleteId = null;
+        if (btn) {
+          btn.disabled = true;
+          btn.textContent = '...';
+        }
         vscode.postMessage({ command: 'delete', accountId: id });
+      } else {
+        if (deleteTimeout) clearTimeout(deleteTimeout);
+        document.querySelectorAll('.btn-delete').forEach(b => {
+          b.textContent = '✕';
+          b.classList.remove('confirm-delete');
+        });
+
+        pendingDeleteId = id;
+        if (btn) {
+          btn.textContent = 'Remove?';
+          btn.classList.add('confirm-delete');
+        }
+
+        deleteTimeout = setTimeout(() => {
+          if (pendingDeleteId === id) {
+            pendingDeleteId = null;
+            if (btn) {
+              btn.textContent = '✕';
+              btn.classList.remove('confirm-delete');
+            }
+          }
+        }, 3500);
       }
     }
 

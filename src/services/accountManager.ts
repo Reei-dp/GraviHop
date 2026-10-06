@@ -296,21 +296,17 @@ export class AccountManager {
       return;
     }
 
-    const confirm = await vscode.window.showWarningMessage(
-      `Remove account ${account.email} from GraviHop pool?`,
-      { modal: true },
-      'Remove'
-    );
-
-    if (confirm === 'Remove') {
-      this.accountsCache = this.accountsCache.filter((a) => a.id !== id);
-      if (this.activeAccountId === id) {
-        this.activeAccountId = this.accountsCache[0]?.id || null;
-        await this.globalState.update(CONSTANTS.STORAGE_KEYS.ACTIVE_ACCOUNT_ID, this.activeAccountId);
+    this.accountsCache = this.accountsCache.filter((a) => a.id !== id);
+    if (this.activeAccountId === id) {
+      this.activeAccountId = this.accountsCache[0]?.id || null;
+      await this.globalState.update(CONSTANTS.STORAGE_KEYS.ACTIVE_ACCOUNT_ID, this.activeAccountId);
+      if (this.activeAccountId) {
+        await this.switchToAccount(this.activeAccountId);
       }
-      await this.persistAccounts();
-      vscode.window.showInformationMessage(`Removed ${account.email}`);
     }
+    await this.persistAccounts();
+    this._onDidChangeAccounts.fire(this.accountsCache);
+    vscode.window.showInformationMessage(`GraviHop: Removed ${account.email}`);
   }
 
   /**
