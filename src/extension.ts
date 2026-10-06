@@ -61,10 +61,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }
   });
 
-  // 5. Initial account load
+  // 5. Initial account load & auto-healing
   const initialAccounts = await accountManager.load();
   const initialActive = accountManager.getActiveAccount();
   statusBar.update(initialActive, initialAccounts.length);
+  await accountManager.autoHealAuthState();
 
   // 6. Listen for IDE Auth session changes (auto-capture new logins)
   context.subscriptions.push(

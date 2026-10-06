@@ -271,21 +271,7 @@ export class AccountManager {
           }
 
           // 2. NATIVE UNIFIED STATE SYNC: Update in-memory state in Antigravity IDE
-          const agySync = (vscode as any).antigravityUnifiedStateSync;
-          if (agySync?.OAuthPreferences?.setOAuthTokenInfo) {
-            try {
-              await agySync.OAuthPreferences.setOAuthTokenInfo({
-                accessToken: target.accessToken,
-                refreshToken: target.refreshToken,
-                expiryDateSeconds: target.expiryDateSeconds || Math.floor(Date.now() / 1000) + 3600,
-                tokenType: 'Bearer',
-                isGcpTos: false,
-              });
-              console.log('[GraviHop] Native in-memory OAuthPreferences updated.');
-            } catch (syncErr) {
-              console.warn('[GraviHop] Native state sync setOAuthTokenInfo warning:', syncErr);
-            }
-          }
+          await this.pushNativeAuthState('signedIn', target);
 
           // 3. PERSISTENCE: Write into state.vscdb on disk (survives IDE restarts)
           const newOAuthB64 = ProtobufHelper.encodeOAuthToken({
@@ -296,17 +282,9 @@ export class AccountManager {
           await DbWatcher.applySession(newOAuthB64, target.rawUserStatusB64);
           await this.setActiveAccountId(target.id);
 
-          // 4. TRIGGER AUTH REFRESH in Antigravity IDE
-          try {
-            await vscode.commands.executeCommand('antigravity.handleAuthRefresh');
-            console.log('[GraviHop] Executed antigravity.handleAuthRefresh');
-          } catch (e) {
-            console.warn('[GraviHop] handleAuthRefresh warning:', e);
-          }
-
           progress.report({ increment: 20, message: 'Restarting Language Server...' });
 
-          // 5. Invalidate quota cache & trigger Language Server restart
+          // 4. Invalidate quota cache & trigger Language Server restart
           QuotaClient.invalidateCache();
           try {
             await vscode.commands.executeCommand(CONSTANTS.COMMANDS.RESTART_LS);
@@ -314,11 +292,11 @@ export class AccountManager {
             console.warn('[GraviHop] restartLanguageServer command warning:', e);
           }
 
-          // 6. Wait for Language Server to fully restart and authenticate
+          // 5. Wait for Language Server to fully restart and authenticate
           progress.report({ increment: 15, message: 'Waiting for Language Server...' });
           await new Promise((resolve) => setTimeout(resolve, 2000));
 
-          // 7. Sync fresh quota from the now-authenticated LS
+          // 6. Sync fresh quota from the now-authenticated LS
           progress.report({ increment: 10, message: 'Syncing live quotas...' });
           const freshQuota = await QuotaClient.fetchActiveQuotaWithRetry(5, 1200);
           if (freshQuota) {
@@ -330,13 +308,8 @@ export class AccountManager {
 
           progress.report({ increment: 5, message: 'Switched successfully!' });
           vscode.window.showInformationMessage(
-            `GraviHop: Switched to ${target.email}!`,
-            'Reload Window'
-          ).then((choice) => {
-            if (choice === 'Reload Window') {
-              vscode.commands.executeCommand('workbench.action.reloadWindow');
-            }
-          });
+            `GraviHop: Switched to ${target.email}! Active and ready.`
+          );
           return true;
         } catch (err) {
           vscode.window.showErrorMessage(`Failed to switch account: ${err}`);
@@ -363,6 +336,106 @@ export class AccountManager {
     await this.persistAccounts();
     this._onDidChangeAccounts.fire(this.accountsCache);
     vscode.window.showInformationMessage(`GraviHop: Removed ${account.email}`);
+  }
+
+  /**
+   * Pushes in-memory auth state and tokens directly into Antigravity Unified State Sync (USS)
+   * This immediately transitions the IDE Chat and agents to signedIn without reload.
+   */
+  public async pushNativeAuthState(
+    state: 'signedIn' | 'signedOut',
+    account?: AccountEntry
+  ): Promise<void> {
+    const agySync = (vscode as any).antigravityUnifiedStateSync;
+    if (!agySync) {
+      console.log('[GraviHop] Native unifiedStateSync API not found on vscode module.');
+      return;
+    }
+
+    try {
+      // 1. In-memory OAuth preferences (tokens)
+      if (account && agySync.OAuthPreferences?.setOAuthTokenInfo) {
+        await agySync.OAuthPreferences.setOAuthTokenInfo({
+          accessToken: account.accessToken,
+          refreshToken: account.refreshToken,
+          expiryDateSeconds: account.expiryDateSeconds || Math.floor(Date.now() / 1000) + 3600,
+          tokenType: 'Bearer',
+          isGcpTos: false,
+        });
+        console.log('[GraviHop] Native in-memory OAuthPreferences updated.');
+      }
+
+      // 2. In-memory authStateWithContextSentinelKey in uss-oauth topic
+      if (agySync.pushUpdate) {
+        await agySync.pushUpdate({
+          topicName: 'uss-oauth',
+          appliedUpdate: {
+            key: 'authStateWithContextSentinelKey',
+            newRow: {
+              value: JSON.stringify({
+                state: state,
+                context: {
+                  project: '',
+                  showProjectError: false,
+                  errorMessage: '',
+                  ineligibleMessage: '',
+                  verificationUrl: '',
+                  isGcpTos: false,
+                  browserOpenFailed: false,
+                  appealUrl: '',
+                  appealLinkText: '',
+                },
+              }),
+              eTag: 0,
+            },
+          },
+        });
+        console.log(`[GraviHop] Native USS authState pushed: ${state}`);
+      }
+
+      // 3. Trigger native IDE auth refresh event
+      try {
+        await vscode.commands.executeCommand('antigravity.handleAuthRefresh');
+        console.log('[GraviHop] Executed antigravity.handleAuthRefresh');
+      } catch (e) {
+        console.warn('[GraviHop] handleAuthRefresh warning:', e);
+      }
+    } catch (err) {
+      console.warn('[GraviHop] pushNativeAuthState warning:', err);
+    }
+  }
+
+  /**
+   * Checks current IDE auth state. If it is in 'loginError' or broken,
+   * automatically heals it by syncing the active account credentials.
+   */
+  public async autoHealAuthState(): Promise<void> {
+    try {
+      const agySync = (vscode as any).antigravityUnifiedStateSync;
+      if (!agySync) return;
+
+      const currentAuthState = agySync.OAuthPreferences?.getAuthState
+        ? await agySync.OAuthPreferences.getAuthState()
+        : null;
+
+      console.log('[GraviHop] Current Antigravity auth state:', currentAuthState);
+
+      const active = this.getActiveAccount();
+      if (
+        active &&
+        (currentAuthState === 'loginError' ||
+          currentAuthState === 'uninitialized' ||
+          currentAuthState === 'signedOut')
+      ) {
+        console.log(`[GraviHop] Detected auth state '${currentAuthState}'. Auto-healing with active account ${active.email}...`);
+        await this.pushNativeAuthState('signedIn', active);
+        try {
+          await vscode.commands.executeCommand(CONSTANTS.COMMANDS.RESTART_LS);
+        } catch {}
+      }
+    } catch (err) {
+      console.warn('[GraviHop] autoHealAuthState warning:', err);
+    }
   }
 
   /**
