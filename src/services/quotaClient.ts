@@ -2,6 +2,7 @@ import * as http from 'http';
 import * as https from 'https';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
+import { GoogleAuthService } from './googleAuth';
 
 const execFileAsync = promisify(execFile);
 
@@ -227,57 +228,158 @@ export class QuotaClient {
 
     try {
       const parsed = JSON.parse(resp.data);
-      const rawGroups = parsed?.response?.groups || [];
+      return this.parseQuotaPayload(parsed);
+    } catch (e) {
+      console.error('[GraviHop] Failed to parse local quota JSON:', e);
+      return null;
+    }
+  }
 
-      let geminiWeeklyPercent = 100;
-      let gemini5hPercent = 100;
-      let claudeWeeklyPercent = 100;
-      let claude5hPercent = 100;
+  /**
+   * Universal parser for Quota JSON payloads (supports both local Language Server and Google Cloud Code API)
+   */
+  public static parseQuotaPayload(parsed: any): QuotaSummary | null {
+    const rawGroups = parsed?.response?.groups || parsed?.groups || [];
+    if (!rawGroups || rawGroups.length === 0) {
+      return null;
+    }
 
-      const groups: QuotaGroup[] = rawGroups.map((g: any) => {
-        const buckets: QuotaBucket[] = (g.buckets || []).map((b: any) => {
-          const fraction = typeof b.remainingFraction === 'number' ? b.remainingFraction : 1.0;
-          const percent = Math.round(fraction * 100);
+    let geminiWeeklyPercent = 100;
+    let gemini5hPercent = 100;
+    let claudeWeeklyPercent = 100;
+    let claude5hPercent = 100;
 
-          if (b.bucketId === 'gemini-weekly') {
-            geminiWeeklyPercent = percent;
-          } else if (b.bucketId === 'gemini-5h') {
-            gemini5hPercent = percent;
-          } else if (b.bucketId === '3p-weekly') {
-            claudeWeeklyPercent = percent;
-          } else if (b.bucketId === '3p-5h') {
-            claude5hPercent = percent;
-          }
+    const groups: QuotaGroup[] = rawGroups.map((g: any) => {
+      const buckets: QuotaBucket[] = (g.buckets || []).map((b: any) => {
+        const fraction = typeof b.remainingFraction === 'number' ? b.remainingFraction : 1.0;
+        const percent = Math.round(fraction * 100);
 
-          return {
-            bucketId: b.bucketId || '',
-            displayName: b.displayName || '',
-            remainingFraction: fraction,
-            remainingPercent: percent,
-            resetTime: b.resetTime,
-            resetFormatted: QuotaClient.formatCountdown(b.resetTime),
-          };
-        });
+        if (b.bucketId === 'gemini-weekly') {
+          geminiWeeklyPercent = percent;
+        } else if (b.bucketId === 'gemini-5h') {
+          gemini5hPercent = percent;
+        } else if (b.bucketId === '3p-weekly') {
+          claudeWeeklyPercent = percent;
+        } else if (b.bucketId === '3p-5h') {
+          claude5hPercent = percent;
+        }
 
         return {
-          displayName: g.displayName || '',
-          description: g.description || '',
-          buckets,
+          bucketId: b.bucketId || '',
+          displayName: b.displayName || '',
+          remainingFraction: fraction,
+          remainingPercent: percent,
+          resetTime: b.resetTime,
+          resetFormatted: QuotaClient.formatCountdown(b.resetTime),
         };
       });
 
       return {
-        geminiWeeklyPercent,
-        gemini5hPercent,
-        claudeWeeklyPercent,
-        claude5hPercent,
-        groups,
-        lastUpdated: Date.now(),
+        displayName: g.displayName || '',
+        description: g.description || '',
+        buckets,
       };
-    } catch (e) {
-      console.error('[GraviHop] Failed to parse quota JSON:', e);
-      return null;
+    });
+
+    return {
+      geminiWeeklyPercent,
+      gemini5hPercent,
+      claudeWeeklyPercent,
+      claude5hPercent,
+      groups,
+      lastUpdated: Date.now(),
+    };
+  }
+
+  /**
+   * Fetches real-time quota for ANY account directly via Google Cloud Code endpoints.
+   * If token is expired or unauthorized, automatically refreshes with refreshToken.
+   */
+  public static async fetchQuotaForAccount(
+    accessToken: string,
+    refreshToken?: string
+  ): Promise<{ quota: QuotaSummary; refreshedToken?: { accessToken: string; expiryDateSeconds: number } } | null> {
+    // 1. Try with current accessToken
+    let res = await this.queryGoogleCloudCodeQuota(accessToken);
+    if (res) {
+      return { quota: res };
     }
+
+    // 2. If failed and refreshToken provided, refresh and retry
+    if (refreshToken) {
+      try {
+        const refreshed = await GoogleAuthService.refreshAccessToken(refreshToken);
+        if (refreshed?.accessToken) {
+          const retryRes = await this.queryGoogleCloudCodeQuota(refreshed.accessToken);
+          if (retryRes) {
+            return {
+              quota: retryRes,
+              refreshedToken: {
+                accessToken: refreshed.accessToken,
+                expiryDateSeconds: refreshed.expiryDateSeconds,
+              },
+            };
+          }
+        }
+      } catch (err) {
+        console.warn('[GraviHop] Token refresh during quota fetch failed:', err);
+      }
+    }
+
+    return null;
+  }
+
+  private static async queryGoogleCloudCodeQuota(accessToken: string): Promise<QuotaSummary | null> {
+    const endpoints = [
+      'https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary',
+      'https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary',
+    ];
+
+    for (const ep of endpoints) {
+      try {
+        const u = new URL(ep);
+        const data = await new Promise<string | null>((resolve) => {
+          const req = https.request(
+            {
+              hostname: u.hostname,
+              path: u.pathname,
+              method: 'POST',
+              headers: {
+                'Authorization': `Bearer ${accessToken}`,
+                'Content-Type': 'application/json',
+                'User-Agent': 'antigravity',
+              },
+              timeout: 4000,
+            },
+            (res) => {
+              if (res.statusCode !== 200) {
+                resolve(null);
+                return;
+              }
+              let body = '';
+              res.on('data', (chunk) => (body += chunk));
+              res.on('end', () => resolve(body));
+            }
+          );
+          req.on('error', () => resolve(null));
+          req.on('timeout', () => {
+            req.destroy();
+            resolve(null);
+          });
+          req.write('{}');
+          req.end();
+        });
+
+        if (data) {
+          const parsed = JSON.parse(data);
+          const summary = this.parseQuotaPayload(parsed);
+          if (summary) {
+            return summary;
+          }
+        }
+      } catch {}
+    }
+    return null;
   }
 
   /**

@@ -637,14 +637,13 @@ export class HubPanel {
                   \` : ''}
                 </div>
                 <div class="quota-info">
-                  \${isActive && g5h !== null ? \`
+                  \${g5h !== null ? \`
                     <span class="quota-metric" title="Gemini 5h: \${g5h}%, Weekly: \${gWk}%">Gemini: <span class="quota-val \${g5h < 15 ? 'low' : ''}">\${g5h}%</span> (5h) • <span class="quota-val \${gWk !== null && gWk < 15 ? 'low' : ''}">\${gWk}%</span> (wk)</span>
                     <span class="quota-metric" title="Claude 5h: \${c5h}%, Weekly: \${cWk}%">Claude: <span class="quota-val \${c5h !== null && c5h < 15 ? 'low' : ''}">\${c5h}%</span> (5h) • <span class="quota-val \${cWk !== null && cWk < 15 ? 'low' : ''}">\${cWk}%</span> (wk)</span>
                     \${resetText ? \`<span>• \${resetText}</span>\` : ''}
-                  \` : isActive ? \`
-                    <span class="quota-status syncing">Syncing live quotas...</span>
+                    \${!isActive ? \`<span class="quota-status standby">• Standby</span>\` : ''}
                   \` : \`
-                    <span class="quota-status standby">Standby</span>
+                    <span class="quota-status syncing">Syncing live quotas...</span>
                   \`}
                 </div>
               </div>

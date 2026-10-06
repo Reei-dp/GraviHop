@@ -121,6 +121,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const initialActive = accountManager.getActiveAccount();
   statusBar.update(initialActive, initialAccounts.length);
   await accountManager.autoHealAuthState();
+  accountManager.refreshAllQuotas().catch((e) => console.warn('[GraviHop] Initial quotas refresh:', e));
 
   // 6. Listen for Unified State Sync topic changes (auto-capture native logins & session updates)
   const agySync = (vscode as any).antigravityUnifiedStateSync;

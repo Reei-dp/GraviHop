@@ -799,19 +799,52 @@ export class AccountManager {
   }
 
   /**
-   * Refreshes quota for active account (and updates cached accounts)
+   * Refreshes quotas for ALL accounts in the pool simultaneously!
+   */
+  public async refreshAllQuotas(): Promise<void> {
+    if (this.accountsCache.length === 0) return;
+
+    QuotaClient.invalidateCache();
+    const active = this.getActiveAccount();
+
+    await Promise.allSettled(
+      this.accountsCache.map(async (acc) => {
+        try {
+          // If active account, try local language server first
+          if (active && acc.id === active.id) {
+            const localQuota = await QuotaClient.fetchActiveQuotaWithRetry(2, 600);
+            if (localQuota) {
+              acc.quota = localQuota;
+              return;
+            }
+          }
+
+          // Otherwise, fetch directly via Google Cloud Code API
+          if (acc.accessToken) {
+            const result = await QuotaClient.fetchQuotaForAccount(acc.accessToken, acc.refreshToken);
+            if (result) {
+              acc.quota = result.quota;
+              if (result.refreshedToken) {
+                acc.accessToken = result.refreshedToken.accessToken;
+                acc.expiryDateSeconds = result.refreshedToken.expiryDateSeconds;
+              }
+            }
+          }
+        } catch (e) {
+          console.warn(`[GraviHop] Failed to fetch quota for ${acc.email}:`, e);
+        }
+      })
+    );
+
+    await this.persistAccounts();
+    this._onDidChangeAccounts.fire(this.accountsCache);
+  }
+
+  /**
+   * Refreshes quotas for active account and all accounts in pool
    */
   public async refreshActiveQuota(): Promise<QuotaSummary | null> {
-    QuotaClient.invalidateCache();
-    const quota = await QuotaClient.fetchActiveQuotaWithRetry(3, 1000);
-    if (quota) {
-      const active = this.getActiveAccount();
-      if (active) {
-        active.quota = quota;
-        await this.persistAccounts();
-        this._onDidChangeAccounts.fire(this.accountsCache);
-      }
-    }
-    return quota;
+    await this.refreshAllQuotas();
+    return this.getActiveAccount()?.quota || null;
   }
 }
