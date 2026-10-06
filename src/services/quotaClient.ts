@@ -1,4 +1,5 @@
 import * as http from 'http';
+import * as https from 'https';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 
@@ -31,10 +32,12 @@ export interface QuotaSummary {
 export class QuotaClient {
   private static cachedPort: number | null = null;
   private static cachedCsrfToken: string | null = null;
+  private static cachedUseHttps = true;
 
   public static invalidateCache(): void {
     this.cachedPort = null;
     this.cachedCsrfToken = null;
+    this.cachedUseHttps = true;
   }
 
   public static formatCountdown(isoString?: string): string {
@@ -73,15 +76,38 @@ export class QuotaClient {
     try {
       // 1. Find process with --csrf_token
       const { stdout: psOut } = await execFileAsync('ps', ['-eo', 'pid,args']);
-      const candidates: { pid: string; csrfToken: string; hasCloudCode: boolean }[] = [];
+      const candidates: { pid: string; csrfToken: string; score: number }[] = [];
 
       for (const line of psOut.split('\n')) {
         if (line.includes('language_server') && line.includes('--csrf_token')) {
           const match = line.match(/--csrf_token\s+([a-f0-9\-]+)/);
           if (match) {
             const pid = line.trim().split(/\s+/)[0];
-            const hasCloudCode = line.includes('cloudcode-pa');
-            candidates.push({ pid, csrfToken: match[1], hasCloudCode });
+            let score = 0;
+            // Antigravity IDE language server (subclient_type ide) is top priority
+            if (line.includes('--subclient_type ide')) {
+              score += 1000;
+            }
+            if (line.includes('antigravity-ide')) {
+              score += 500;
+            }
+            if (line.includes('language_server_linux')) {
+              score += 200;
+            }
+            if (line.includes('cloudcode-pa')) {
+              score += 100;
+            }
+            // Strongly penalize standalone / hub / external CLI processes
+            if (line.includes('--standalone')) {
+              score -= 1000;
+            }
+            if (line.includes('--subclient_type hub')) {
+              score -= 1000;
+            }
+            if (line.includes('/opt/Antigravity/')) {
+              score -= 1000;
+            }
+            candidates.push({ pid, csrfToken: match[1], score });
           }
         }
       }
@@ -90,8 +116,8 @@ export class QuotaClient {
         return null;
       }
 
-      // Prioritize the main language server process that points to cloudcode-pa
-      candidates.sort((a, b) => (b.hasCloudCode ? 1 : 0) - (a.hasCloudCode ? 1 : 0));
+      // Prioritize Antigravity IDE language server over standalone/hub daemons
+      candidates.sort((a, b) => b.score - a.score);
 
       // 2. Discover open ports via ss -tulpn
       const { stdout: ssOut } = await execFileAsync('ss', ['-tulpn']);
@@ -119,9 +145,15 @@ export class QuotaClient {
     return null;
   }
 
-  private static probePort(port: number, csrfToken: string): Promise<boolean> {
+  private static sendQuotaRequest(
+    port: number,
+    csrfToken: string,
+    useHttps: boolean,
+    timeoutMs = 1500
+  ): Promise<{ statusCode?: number; data: string } | null> {
+    const mod = useHttps ? (https as any) : (http as any);
     return new Promise((resolve) => {
-      const req = http.request(
+      const req = mod.request(
         {
           hostname: '127.0.0.1',
           port,
@@ -131,20 +163,39 @@ export class QuotaClient {
             'Content-Type': 'application/json',
             'x-codeium-csrf-token': csrfToken,
           },
-          timeout: 1000,
+          timeout: timeoutMs,
+          rejectUnauthorized: false,
         },
-        (res) => {
-          resolve(res.statusCode === 200);
+        (res: http.IncomingMessage) => {
+          let data = '';
+          res.on('data', (chunk: Buffer | string) => (data += chunk));
+          res.on('end', () => resolve({ statusCode: res.statusCode, data }));
         }
       );
-      req.on('error', () => resolve(false));
+      req.on('error', () => resolve(null));
       req.on('timeout', () => {
         req.destroy();
-        resolve(false);
+        resolve(null);
       });
       req.write('{}');
       req.end();
     });
+  }
+
+  private static async probePort(port: number, csrfToken: string): Promise<boolean> {
+    // Try HTTPS first (Antigravity IDE language server uses HTTPS)
+    const resHttps = await this.sendQuotaRequest(port, csrfToken, true, 1200);
+    if (resHttps?.statusCode === 200) {
+      this.cachedUseHttps = true;
+      return true;
+    }
+    // Fallback to plain HTTP
+    const resHttp = await this.sendQuotaRequest(port, csrfToken, false, 1200);
+    if (resHttp?.statusCode === 200) {
+      this.cachedUseHttps = false;
+      return true;
+    }
+    return false;
   }
 
   /**
@@ -163,92 +214,70 @@ export class QuotaClient {
       csrfToken = discovered.csrfToken;
     }
 
-    return new Promise((resolve) => {
-      const req = http.request(
-        {
-          hostname: '127.0.0.1',
-          port,
-          path: '/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary',
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'x-codeium-csrf-token': csrfToken,
-          },
-          timeout: 3000,
-        },
-        (res) => {
-          let data = '';
-          res.on('data', (chunk) => (data += chunk));
-          res.on('end', () => {
-            if (res.statusCode === 200) {
-              try {
-                const parsed = JSON.parse(data);
-                const rawGroups = parsed?.response?.groups || [];
+    let resp = await this.sendQuotaRequest(port, csrfToken, this.cachedUseHttps, 3000);
+    if (!resp || resp.statusCode !== 200) {
+      // Try toggle protocol
+      this.cachedUseHttps = !this.cachedUseHttps;
+      resp = await this.sendQuotaRequest(port, csrfToken, this.cachedUseHttps, 3000);
+    }
 
-                let geminiWeeklyPercent = 100;
-                let gemini5hPercent = 100;
-                let claudeWeeklyPercent = 100;
-                let claude5hPercent = 100;
+    if (!resp || resp.statusCode !== 200) {
+      return null;
+    }
 
-                const groups: QuotaGroup[] = rawGroups.map((g: any) => {
-                  const buckets: QuotaBucket[] = (g.buckets || []).map((b: any) => {
-                    const fraction = typeof b.remainingFraction === 'number' ? b.remainingFraction : 1.0;
-                    const percent = Math.round(fraction * 100);
+    try {
+      const parsed = JSON.parse(resp.data);
+      const rawGroups = parsed?.response?.groups || [];
 
-                    if (b.bucketId === 'gemini-weekly') {
-                      geminiWeeklyPercent = percent;
-                    } else if (b.bucketId === 'gemini-5h') {
-                      gemini5hPercent = percent;
-                    } else if (b.bucketId === '3p-weekly') {
-                      claudeWeeklyPercent = percent;
-                    } else if (b.bucketId === '3p-5h') {
-                      claude5hPercent = percent;
-                    }
+      let geminiWeeklyPercent = 100;
+      let gemini5hPercent = 100;
+      let claudeWeeklyPercent = 100;
+      let claude5hPercent = 100;
 
-                    return {
-                      bucketId: b.bucketId || '',
-                      displayName: b.displayName || '',
-                      remainingFraction: fraction,
-                      remainingPercent: percent,
-                      resetTime: b.resetTime,
-                      resetFormatted: QuotaClient.formatCountdown(b.resetTime),
-                    };
-                  });
+      const groups: QuotaGroup[] = rawGroups.map((g: any) => {
+        const buckets: QuotaBucket[] = (g.buckets || []).map((b: any) => {
+          const fraction = typeof b.remainingFraction === 'number' ? b.remainingFraction : 1.0;
+          const percent = Math.round(fraction * 100);
 
-                  return {
-                    displayName: g.displayName || '',
-                    description: g.description || '',
-                    buckets,
-                  };
-                });
+          if (b.bucketId === 'gemini-weekly') {
+            geminiWeeklyPercent = percent;
+          } else if (b.bucketId === 'gemini-5h') {
+            gemini5hPercent = percent;
+          } else if (b.bucketId === '3p-weekly') {
+            claudeWeeklyPercent = percent;
+          } else if (b.bucketId === '3p-5h') {
+            claude5hPercent = percent;
+          }
 
-                resolve({
-                  geminiWeeklyPercent,
-                  gemini5hPercent,
-                  claudeWeeklyPercent,
-                  claude5hPercent,
-                  groups,
-                  lastUpdated: Date.now(),
-                });
-              } catch (e) {
-                console.error('[GraviHop] Failed to parse quota JSON:', e);
-                resolve(null);
-              }
-            } else {
-              resolve(null);
-            }
-          });
-        }
-      );
+          return {
+            bucketId: b.bucketId || '',
+            displayName: b.displayName || '',
+            remainingFraction: fraction,
+            remainingPercent: percent,
+            resetTime: b.resetTime,
+            resetFormatted: QuotaClient.formatCountdown(b.resetTime),
+          };
+        });
 
-      req.on('error', () => resolve(null));
-      req.on('timeout', () => {
-        req.destroy();
-        resolve(null);
+        return {
+          displayName: g.displayName || '',
+          description: g.description || '',
+          buckets,
+        };
       });
-      req.write('{}');
-      req.end();
-    });
+
+      return {
+        geminiWeeklyPercent,
+        gemini5hPercent,
+        claudeWeeklyPercent,
+        claude5hPercent,
+        groups,
+        lastUpdated: Date.now(),
+      };
+    } catch (e) {
+      console.error('[GraviHop] Failed to parse quota JSON:', e);
+      return null;
+    }
   }
 
   /**

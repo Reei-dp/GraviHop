@@ -176,7 +176,9 @@ export class AccountManager {
         refreshToken: decodedToken.refreshToken,
         accessToken: decodedToken.accessToken,
         expiryDateSeconds: decodedToken.expiryDateSeconds,
-        rawUserStatusB64: userStatusRaw || undefined,
+        rawUserStatusB64: (userStatusRaw && userStatusRaw.length > 0)
+          ? userStatusRaw
+          : (existingIdx >= 0 ? this.accountsCache[existingIdx].rawUserStatusB64 : undefined),
         quota: quota || undefined,
         lastCapturedAt: Date.now(),
       };
@@ -227,34 +229,70 @@ export class AccountManager {
       },
       async (progress) => {
         try {
-          progress.report({ increment: 20, message: 'Checking token validity...' });
+          progress.report({ increment: 15, message: 'Checking token validity...' });
 
           // 1. Refresh token if expired or about to expire in next 5 minutes
           const nowSec = Math.floor(Date.now() / 1000);
           if (!target.accessToken || nowSec + 300 >= target.expiryDateSeconds) {
-            progress.report({ increment: 20, message: 'Refreshing Google Access Token...' });
+            progress.report({ increment: 15, message: 'Refreshing Google Access Token...' });
             const refreshRes = await GoogleAuthService.refreshAccessToken(target.refreshToken);
             target.accessToken = refreshRes.accessToken;
             target.expiryDateSeconds = refreshRes.expiryDateSeconds;
             await this.persistAccounts();
           }
 
-          progress.report({ increment: 30, message: 'Updating state.vscdb...' });
+          progress.report({ increment: 20, message: 'Updating session credentials...' });
 
-          // 2. Re-encode OAuth token protobuf
+          // Ensure valid userStatus (never wipe IDE model catalog and tiers)
+          if (!target.rawUserStatusB64 || target.rawUserStatusB64.length === 0) {
+            const donor = this.accountsCache.find((a) => a.rawUserStatusB64 && a.rawUserStatusB64.length > 0);
+            if (donor) {
+              target.rawUserStatusB64 = donor.rawUserStatusB64;
+            } else {
+              const currentInDb = await DbWatcher.getActiveUserStatusRaw();
+              if (currentInDb && currentInDb.length > 0) {
+                target.rawUserStatusB64 = currentInDb;
+              }
+            }
+          }
+
+          // 2. NATIVE UNIFIED STATE SYNC: Update in-memory state in Antigravity IDE
+          const agySync = (vscode as any).antigravityUnifiedStateSync;
+          if (agySync?.OAuthPreferences?.setOAuthTokenInfo) {
+            try {
+              await agySync.OAuthPreferences.setOAuthTokenInfo({
+                accessToken: target.accessToken,
+                refreshToken: target.refreshToken,
+                expiryDateSeconds: target.expiryDateSeconds || Math.floor(Date.now() / 1000) + 3600,
+                tokenType: 'Bearer',
+                isGcpTos: false,
+              });
+              console.log('[GraviHop] Native in-memory OAuthPreferences updated.');
+            } catch (syncErr) {
+              console.warn('[GraviHop] Native state sync setOAuthTokenInfo warning:', syncErr);
+            }
+          }
+
+          // 3. PERSISTENCE: Write into state.vscdb on disk (survives IDE restarts)
           const newOAuthB64 = ProtobufHelper.encodeOAuthToken({
             accessToken: target.accessToken,
             refreshToken: target.refreshToken,
             expiryDateSeconds: target.expiryDateSeconds,
           });
-
-          // 3. Write into state.vscdb
           await DbWatcher.applySession(newOAuthB64, target.rawUserStatusB64);
           await this.setActiveAccountId(target.id);
 
+          // 4. TRIGGER AUTH REFRESH in Antigravity IDE
+          try {
+            await vscode.commands.executeCommand('antigravity.handleAuthRefresh');
+            console.log('[GraviHop] Executed antigravity.handleAuthRefresh');
+          } catch (e) {
+            console.warn('[GraviHop] handleAuthRefresh warning:', e);
+          }
+
           progress.report({ increment: 20, message: 'Restarting Language Server...' });
 
-          // 4. Invalidate quota cache & trigger Language Server restart
+          // 5. Invalidate quota cache & trigger Language Server restart
           QuotaClient.invalidateCache();
           try {
             await vscode.commands.executeCommand(CONSTANTS.COMMANDS.RESTART_LS);
@@ -262,25 +300,28 @@ export class AccountManager {
             console.warn('[GraviHop] restartLanguageServer command warning:', e);
           }
 
-          // 5. Poll with retry for Language Server startup, then fetch fresh quota
-          progress.report({ increment: 15, message: 'Syncing live quotas...' });
-          await new Promise((resolve) => setTimeout(resolve, 800));
-          const freshQuota = await QuotaClient.fetchActiveQuotaWithRetry(6, 1200);
+          // 6. Wait for Language Server to fully restart and authenticate
+          progress.report({ increment: 15, message: 'Waiting for Language Server...' });
+          await new Promise((resolve) => setTimeout(resolve, 2000));
+
+          // 7. Sync fresh quota from the now-authenticated LS
+          progress.report({ increment: 10, message: 'Syncing live quotas...' });
+          const freshQuota = await QuotaClient.fetchActiveQuotaWithRetry(5, 1200);
           if (freshQuota) {
             target.quota = freshQuota;
-          }
-
-          // 6. Capture updated user status if generated by LS
-          const freshStatus = await DbWatcher.getActiveUserStatusRaw();
-          if (freshStatus) {
-            target.rawUserStatusB64 = freshStatus;
           }
 
           await this.persistAccounts();
           this._onDidChangeAccounts.fire(this.accountsCache);
 
-          progress.report({ increment: 10, message: 'Switched successfully!' });
-          vscode.window.showInformationMessage(`GraviHop: Switched to ${target.email}`);
+          progress.report({ increment: 5, message: 'Switched successfully!' });
+          const choice = await vscode.window.showInformationMessage(
+            `GraviHop: Switched to ${target.email}!`,
+            'Reload Window'
+          );
+          if (choice === 'Reload Window') {
+            await vscode.commands.executeCommand('workbench.action.reloadWindow');
+          }
           return true;
         } catch (err) {
           vscode.window.showErrorMessage(`Failed to switch account: ${err}`);
@@ -387,6 +428,7 @@ export class AccountManager {
                     const profile = await GoogleAuthService.fetchUserProfile(tokens.accessToken);
                     const email = profile?.email || 'unknown@gmail.com';
 
+                    const donor = this.accountsCache.find((a) => a.rawUserStatusB64 && a.rawUserStatusB64.length > 0);
                     const newEntry: AccountEntry = {
                       id: email,
                       email: email,
@@ -395,6 +437,7 @@ export class AccountManager {
                       refreshToken: tokens.refreshToken,
                       accessToken: tokens.accessToken,
                       expiryDateSeconds: tokens.expiryDateSeconds,
+                      rawUserStatusB64: donor?.rawUserStatusB64,
                       lastCapturedAt: Date.now(),
                     };
 

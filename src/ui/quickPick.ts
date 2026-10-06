@@ -32,13 +32,23 @@ export class QuickPickManager {
 
         if (acc.quota) {
           const g5h = acc.quota.gemini5hPercent;
+          const gWk = acc.quota.geminiWeeklyPercent;
           const c5h = acc.quota.claude5hPercent;
+          const cWk = acc.quota.claudeWeeklyPercent;
 
           const geminiGroup = acc.quota.groups.find((g) => g.displayName.includes('Gemini'));
           const bucket5h = geminiGroup?.buckets.find((b) => b.bucketId === 'gemini-5h');
-          const resetText = bucket5h?.resetFormatted ? ` • Reset: ${bucket5h.resetFormatted}` : '';
+          const claudeGroup = acc.quota.groups.find((g) => g.displayName.includes('Claude'));
+          const claude5hBucket = claudeGroup?.buckets.find((b) => b.bucketId === '3p-5h');
 
-          quotaDetails = `⚡ Gemini: ${g5h}% | 🤖 Claude: ${c5h}%${resetText}${!isActive ? ' (Standby)' : ''}`;
+          let resetText = '';
+          if (c5h < 20 && claude5hBucket?.resetFormatted) {
+            resetText = ` • Claude reset: ${claude5hBucket.resetFormatted}`;
+          } else if (bucket5h?.resetFormatted) {
+            resetText = ` • Reset: ${bucket5h.resetFormatted}`;
+          }
+
+          quotaDetails = `⚡ Gemini: ${g5h}% (5h) / ${gWk}% (wk) | 🤖 Claude: ${c5h}% (5h) / ${cWk}% (wk)${resetText}${!isActive ? ' (Standby)' : ''}`;
         } else if (isActive) {
           quotaDetails = 'Syncing live quotas...';
         } else {

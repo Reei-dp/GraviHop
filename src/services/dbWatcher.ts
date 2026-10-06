@@ -148,7 +148,8 @@ except Exception as e:
       throw new Error('Failed to write OAuth token to state.vscdb');
     }
 
-    if (userStatusB64) {
+    // Only write userStatus if non-empty to prevent wiping IDE model catalog & user tier
+    if (userStatusB64 && userStatusB64.trim().length > 0) {
       await this.writeKey(CONSTANTS.DB_KEYS.USER_STATUS, userStatusB64);
     }
 

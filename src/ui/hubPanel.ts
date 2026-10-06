@@ -377,7 +377,8 @@ export class HubPanel {
     .quota-info {
       display: flex;
       align-items: center;
-      gap: 12px;
+      flex-wrap: wrap;
+      gap: 8px 12px;
       font-size: 12px;
       color: var(--text-muted);
       margin-top: 4px;
@@ -593,10 +594,26 @@ export class HubPanel {
         const g5h = quota ? quota.gemini5hPercent : null;
         const gWk = quota ? quota.geminiWeeklyPercent : null;
         const c5h = quota ? quota.claude5hPercent : null;
+        const cWk = quota ? quota.claudeWeeklyPercent : null;
 
         const geminiGroup = quota?.groups?.find(g => g.displayName.includes('Gemini'));
         const gemini5hBucket = geminiGroup?.buckets?.find(b => b.bucketId === 'gemini-5h');
-        const resetText = gemini5hBucket?.resetFormatted ? ('Resets in ' + gemini5hBucket.resetFormatted) : null;
+        const claudeGroup = quota?.groups?.find(g => g.displayName.includes('Claude'));
+        const claude5hBucket = claudeGroup?.buckets?.find(b => b.bucketId === '3p-5h');
+
+        const gReset = gemini5hBucket?.resetFormatted;
+        const cReset = claude5hBucket?.resetFormatted;
+
+        let resetText = '';
+        if (c5h !== null && c5h < 20 && cReset) {
+          resetText = 'Claude resets in ' + cReset;
+        } else if (g5h !== null && g5h < 20 && gReset) {
+          resetText = 'Gemini resets in ' + gReset;
+        } else if (gReset) {
+          resetText = 'Resets in ' + gReset;
+        } else if (cReset) {
+          resetText = 'Resets in ' + cReset;
+        }
 
         return \`
           <div class="account-item \${isActive ? 'active' : ''}">
@@ -613,15 +630,14 @@ export class HubPanel {
                   \` : ''}
                 </div>
                 <div class="quota-info">
-                  \${g5h !== null ? \`
-                    <span class="quota-metric">Gemini: <span class="quota-val \${g5h < 15 ? 'low' : ''}">\${g5h}%</span> (5h) • <span class="quota-val">\${gWk}%</span> (wk)</span>
-                    <span class="quota-metric">Claude: <span class="quota-val \${c5h < 15 ? 'low' : ''}">\${c5h}%</span></span>
+                  \${isActive && g5h !== null ? \`
+                    <span class="quota-metric" title="Gemini 5h: \${g5h}%, Weekly: \${gWk}%">Gemini: <span class="quota-val \${g5h < 15 ? 'low' : ''}">\${g5h}%</span> (5h) • <span class="quota-val \${gWk !== null && gWk < 15 ? 'low' : ''}">\${gWk}%</span> (wk)</span>
+                    <span class="quota-metric" title="Claude 5h: \${c5h}%, Weekly: \${cWk}%">Claude: <span class="quota-val \${c5h !== null && c5h < 15 ? 'low' : ''}">\${c5h}%</span> (5h) • <span class="quota-val \${cWk !== null && cWk < 15 ? 'low' : ''}">\${cWk}%</span> (wk)</span>
                     \${resetText ? \`<span>• \${resetText}</span>\` : ''}
-                    \${!isActive ? \`<span style="opacity: 0.7;">• Standby</span>\` : ''}
                   \` : isActive ? \`
                     <span class="quota-status syncing">Syncing live quotas...</span>
                   \` : \`
-                    <span class="quota-status standby">Standby • Click Switch to activate & sync</span>
+                    <span class="quota-status standby">Standby</span>
                   \`}
                 </div>
               </div>

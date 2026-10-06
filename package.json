@@ -2,7 +2,7 @@
   "name": "gravihop",
   "displayName": "GraviHop — Antigravity Account Switcher",
   "description": "Multi-account pool manager, real-time quota monitor and 1-click seamless account switcher for Antigravity IDE",
-  "version": "0.1.3",
+  "version": "0.1.6",
   "publisher": "reei",
   "license": "MIT",
   "repository": {
@@ -12,6 +12,9 @@
   "engines": {
     "vscode": "^1.85.0"
   },
+  "enabledApiProposals": [
+    "antigravityUnifiedStateSync"
+  ],
   "categories": [
     "Other",
     "Productivity"
