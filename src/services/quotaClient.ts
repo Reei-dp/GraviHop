@@ -32,6 +32,11 @@ export class QuotaClient {
   private static cachedPort: number | null = null;
   private static cachedCsrfToken: string | null = null;
 
+  public static invalidateCache(): void {
+    this.cachedPort = null;
+    this.cachedCsrfToken = null;
+  }
+
   public static formatCountdown(isoString?: string): string {
     if (!isoString) {
       return '';
@@ -68,14 +73,15 @@ export class QuotaClient {
     try {
       // 1. Find process with --csrf_token
       const { stdout: psOut } = await execFileAsync('ps', ['-eo', 'pid,args']);
-      const candidates: { pid: string; csrfToken: string }[] = [];
+      const candidates: { pid: string; csrfToken: string; hasCloudCode: boolean }[] = [];
 
       for (const line of psOut.split('\n')) {
         if (line.includes('language_server') && line.includes('--csrf_token')) {
           const match = line.match(/--csrf_token\s+([a-f0-9\-]+)/);
           if (match) {
             const pid = line.trim().split(/\s+/)[0];
-            candidates.push({ pid, csrfToken: match[1] });
+            const hasCloudCode = line.includes('cloudcode-pa');
+            candidates.push({ pid, csrfToken: match[1], hasCloudCode });
           }
         }
       }
@@ -83,6 +89,9 @@ export class QuotaClient {
       if (candidates.length === 0) {
         return null;
       }
+
+      // Prioritize the main language server process that points to cloudcode-pa
+      candidates.sort((a, b) => (b.hasCloudCode ? 1 : 0) - (a.hasCloudCode ? 1 : 0));
 
       // 2. Discover open ports via ss -tulpn
       const { stdout: ssOut } = await execFileAsync('ss', ['-tulpn']);
@@ -240,5 +249,26 @@ export class QuotaClient {
       req.write('{}');
       req.end();
     });
+  }
+
+  /**
+   * Fetches active quota with automatic invalidation and exponential/poll retry.
+   * Crucial after language server restarts.
+   */
+  public static async fetchActiveQuotaWithRetry(
+    maxAttempts = 5,
+    delayMs = 1200
+  ): Promise<QuotaSummary | null> {
+    this.invalidateCache();
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      const quota = await this.fetchActiveQuota();
+      if (quota) {
+        return quota;
+      }
+      if (attempt < maxAttempts) {
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+      }
+    }
+    return null;
   }
 }

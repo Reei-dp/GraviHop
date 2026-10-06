@@ -398,6 +398,23 @@ export class HubPanel {
       color: var(--badge-error);
     }
 
+    .quota-status {
+      font-size: 11px;
+      color: var(--text-muted);
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .quota-status.syncing {
+      color: var(--btn-bg);
+      font-weight: 500;
+    }
+
+    .quota-status.standby {
+      color: var(--text-muted);
+    }
+
     /* Item Right Controls */
     .item-right {
       display: flex;
@@ -586,8 +603,11 @@ export class HubPanel {
                     <span class="quota-metric">Gemini: <span class="quota-val \${g5h < 15 ? 'low' : ''}">\${g5h}%</span> (5h) • <span class="quota-val">\${gWk}%</span> (wk)</span>
                     <span class="quota-metric">Claude: <span class="quota-val \${c5h < 15 ? 'low' : ''}">\${c5h}%</span></span>
                     \${resetText ? \`<span>• \${resetText}</span>\` : ''}
+                    \${!isActive ? \`<span style="opacity: 0.7;">• Standby</span>\` : ''}
+                  \` : isActive ? \`
+                    <span class="quota-status syncing">Syncing live quotas...</span>
                   \` : \`
-                    <span>Quotas pending...</span>
+                    <span class="quota-status standby">Standby • Click Switch to activate & sync</span>
                   \`}
                 </div>
               </div>
@@ -595,7 +615,7 @@ export class HubPanel {
 
             <div class="item-right">
               \${!isActive ? \`
-                <button class="btn-primary btn-switch" onclick="switchAcc('\${acc.id}')">
+                <button class="btn-primary btn-switch" id="btn-switch-\${acc.id}" onclick="switchAcc('\${acc.id}', this)">
                   Switch
                 </button>
               \` : ''}
@@ -608,7 +628,12 @@ export class HubPanel {
       }).join('');
     }
 
-    function switchAcc(id) {
+    function switchAcc(id, btn) {
+      if (btn) {
+        btn.disabled = true;
+        btn.textContent = 'Switching...';
+        btn.style.opacity = '0.7';
+      }
       vscode.postMessage({ command: 'switch', accountId: id });
     }
 

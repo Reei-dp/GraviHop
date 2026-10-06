@@ -27,7 +27,7 @@ export class QuickPickManager {
         const prefix = isActive ? '✓ ' : '   ';
         const num = `[${idx + 1}]`;
 
-        let quotaDetails = 'Quotas pending...';
+        let quotaDetails = '';
         let detail = '';
 
         if (acc.quota) {
@@ -38,7 +38,11 @@ export class QuickPickManager {
           const bucket5h = geminiGroup?.buckets.find((b) => b.bucketId === 'gemini-5h');
           const resetText = bucket5h?.resetFormatted ? ` • Reset: ${bucket5h.resetFormatted}` : '';
 
-          quotaDetails = `⚡ Gemini: ${g5h}% | 🤖 3P: ${c5h}%${resetText}`;
+          quotaDetails = `⚡ Gemini: ${g5h}% | 🤖 Claude: ${c5h}%${resetText}${!isActive ? ' (Standby)' : ''}`;
+        } else if (isActive) {
+          quotaDetails = 'Syncing live quotas...';
+        } else {
+          quotaDetails = 'Standby (syncs on switch)';
         }
 
         if (isActive) {
