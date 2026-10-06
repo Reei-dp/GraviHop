@@ -43,6 +43,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.commands.registerCommand('gravihop.captureCurrentAccount', async () => {
       await accountManager.captureCurrentAccount(true);
     }),
+    vscode.commands.registerCommand('gravihop.addAccount', async () => {
+      await accountManager.loginWithGoogleBrowser();
+    }),
     vscode.commands.registerCommand('gravihop.openDashboard', () => {
       HubPanel.show(context.extensionUri);
     })

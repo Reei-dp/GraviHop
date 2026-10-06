@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import * as http from 'http';
 import { CONSTANTS } from '../utils/constants';
 import { ProtobufHelper } from '../utils/protobufHelper';
 import { DbWatcher } from './dbWatcher';
@@ -300,6 +301,163 @@ export class AccountManager {
       await this.persistAccounts();
       vscode.window.showInformationMessage(`Removed ${account.email}`);
     }
+  }
+
+  /**
+   * Starts a local loopback server, launches browser for Google OAuth,
+   * captures incoming code, fetches tokens, and adds account to pool.
+   */
+  public async loginWithGoogleBrowser(): Promise<AccountEntry | null> {
+    return new Promise((resolve) => {
+      let server: http.Server | null = null;
+      let timeoutId: NodeJS.Timeout | null = null;
+
+      const cleanup = () => {
+        if (timeoutId) {
+          clearTimeout(timeoutId);
+          timeoutId = null;
+        }
+        if (server) {
+          try {
+            server.close();
+          } catch {}
+          server = null;
+        }
+      };
+
+      try {
+        server = http.createServer(async (req, res) => {
+          try {
+            const host = req.headers.host || '127.0.0.1';
+            const reqUrl = new URL(req.url || '', `http://${host}`);
+            if (reqUrl.pathname === '/oauth-callback') {
+              const code = reqUrl.searchParams.get('code');
+              const error = reqUrl.searchParams.get('error');
+
+              if (error) {
+                res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+                res.end(`<html><body style="font-family:sans-serif;background:#18181b;color:#ef4444;text-align:center;padding:50px;"><h2>Authorization cancelled</h2><p>${error}</p></body></html>`);
+                cleanup();
+                resolve(null);
+                return;
+              }
+
+              if (!code) {
+                res.writeHead(400, { 'Content-Type': 'text/plain' });
+                res.end('Missing authorization code');
+                return;
+              }
+
+              // Serve sleek confirmation page
+              res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+              res.end(`<!DOCTYPE html>
+<html>
+<head><title>GraviHop Authorized</title></head>
+<body style="font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif;background:#18181b;color:#f4f4f5;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;">
+  <div style="background:#27272a;border:1px solid #3f3f46;border-radius:12px;padding:32px 40px;text-align:center;box-shadow:0 10px 30px rgba(0,0,0,0.5);">
+    <div style="font-size:36px;margin-bottom:12px;">✅</div>
+    <h2 style="margin:0 0 8px 0;font-size:18px;">Account added to GraviHop!</h2>
+    <p style="margin:0;color:#a1a1aa;font-size:13px;">You can now close this tab and return to Antigravity IDE.</p>
+  </div>
+  <script>setTimeout(() => window.close(), 1500);</script>
+</body>
+</html>`);
+
+              const address = server?.address();
+              const port = typeof address === 'object' && address ? address.port : 0;
+              const redirectUri = `http://127.0.0.1:${port}/oauth-callback`;
+
+              cleanup();
+
+              await vscode.window.withProgress(
+                {
+                  location: vscode.ProgressLocation.Notification,
+                  title: 'GraviHop: Authorizing new account...',
+                  cancellable: false,
+                },
+                async () => {
+                  try {
+                    const tokens = await GoogleAuthService.exchangeCodeForTokens(code, redirectUri);
+                    const profile = await GoogleAuthService.fetchUserProfile(tokens.accessToken);
+                    const email = profile?.email || 'unknown@gmail.com';
+
+                    const newEntry: AccountEntry = {
+                      id: email,
+                      email: email,
+                      name: profile?.name || email.split('@')[0],
+                      picture: profile?.picture,
+                      refreshToken: tokens.refreshToken,
+                      accessToken: tokens.accessToken,
+                      expiryDateSeconds: tokens.expiryDateSeconds,
+                      lastCapturedAt: Date.now(),
+                    };
+
+                    const existingIdx = this.accountsCache.findIndex((a) => a.id === newEntry.id);
+                    if (existingIdx >= 0) {
+                      this.accountsCache[existingIdx] = newEntry;
+                    } else {
+                      this.accountsCache.push(newEntry);
+                    }
+
+                    await this.persistAccounts();
+                    this._onDidChangeAccounts.fire(this.accountsCache);
+
+                    vscode.window.showInformationMessage(
+                      `GraviHop: Account ${email} successfully added to pool!`
+                    );
+                    resolve(newEntry);
+                  } catch (e: any) {
+                    vscode.window.showErrorMessage(`GraviHop OAuth failed: ${e.message}`);
+                    resolve(null);
+                  }
+                }
+              );
+            }
+          } catch (e) {
+            cleanup();
+            resolve(null);
+          }
+        });
+
+        // Listen on random free port on loopback 127.0.0.1
+        server.listen(0, '127.0.0.1', async () => {
+          const address = server?.address();
+          if (!address || typeof address !== 'object') {
+            cleanup();
+            resolve(null);
+            return;
+          }
+
+          const port = address.port;
+          const redirectUri = `http://127.0.0.1:${port}/oauth-callback`;
+          const scopes = encodeURIComponent(
+            'https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/userinfo.profile'
+          );
+
+          const authUrl = `https://accounts.google.com/o/oauth2/v2/auth?client_id=${CONSTANTS.GOOGLE_OAUTH.CLIENT_ID}&redirect_uri=${encodeURIComponent(
+            redirectUri
+          )}&response_type=code&scope=${scopes}&access_type=offline&prompt=select_account%20consent`;
+
+          await vscode.env.openExternal(vscode.Uri.parse(authUrl));
+
+          // 3-minute timeout
+          timeoutId = setTimeout(() => {
+            cleanup();
+            resolve(null);
+          }, 180000);
+        });
+
+        server.on('error', (err) => {
+          cleanup();
+          vscode.window.showErrorMessage(`GraviHop OAuth server error: ${err.message}`);
+          resolve(null);
+        });
+      } catch (err: any) {
+        cleanup();
+        vscode.window.showErrorMessage(`Failed to start login: ${err.message}`);
+        resolve(null);
+      }
+    });
   }
 
   /**

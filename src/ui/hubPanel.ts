@@ -73,7 +73,8 @@ export class HubPanel {
             this.updateContent();
             break;
           case 'login':
-            await vscode.commands.executeCommand(CONSTANTS.COMMANDS.LOGIN);
+            await manager.loginWithGoogleBrowser();
+            this.updateContent();
             break;
           case 'refresh':
             await manager.refreshActiveQuota();

@@ -40,7 +40,7 @@ export class AccountsWebviewProvider implements vscode.WebviewViewProvider {
           await manager.captureCurrentAccount(true);
           break;
         case 'login':
-          await vscode.commands.executeCommand(CONSTANTS.COMMANDS.LOGIN);
+          await manager.loginWithGoogleBrowser();
           break;
         case 'refresh':
           await manager.refreshActiveQuota();

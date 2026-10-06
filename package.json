@@ -2,7 +2,7 @@
   "name": "gravihop",
   "displayName": "GraviHop — Antigravity Account Switcher",
   "description": "Multi-account pool manager, real-time quota monitor and 1-click seamless account switcher for Antigravity IDE",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "publisher": "reei",
   "license": "MIT",
   "repository": {
@@ -52,6 +52,11 @@
       {
         "command": "gravihop.captureCurrentAccount",
         "title": "GraviHop: Capture / Save Active Account",
+        "icon": "$(add)"
+      },
+      {
+        "command": "gravihop.addAccount",
+        "title": "GraviHop: Add Google Account (OAuth)",
         "icon": "$(add)"
       },
       {
